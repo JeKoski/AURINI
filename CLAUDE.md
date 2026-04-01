@@ -624,6 +624,7 @@ Plugin folders use hyphenated names (`llama-cpp`) for readability and consistenc
 - [ ] Model file management (download, organise, delete)
 - [ ] Python runtime update UI (Settings → Components)
 - [ ] Retire `update_llama.py` once first end-to-end test confirms core runner works
+- [ ] Data directory mode setting — AURINI currently hardcodes its data directory (~/aurini/ on Linux/Mac, %APPDATA%/aurini/ on Windows). Three modes should be supported: os_default (current behaviour), portable (a aurini-data/ folder next to the executable — useful for keeping everything in one place), and custom (user-specified path). The mode preference is stored in a small fixed-location config file (~/.config/aurini/aurini.conf on Linux/Mac) that never moves regardless of which mode is chosen — this solves the bootstrapping problem of "where do I store the setting that tells me where to store things." Only aurini_data_dir() in paths.py needs to change; everything downstream (aurini_logs_dir(), aurini_instances_dir(), etc.) follows automatically. As a dev convenience in the meantime, aurini_data_dir() can check for an AURINI_DATA_DIR env var and use that if set — three-line change, fully reversible. Best implemented when the GUI settings screen exists, since the user needs a UI to choose the mode. The env var override is the right stopgap until then.
 
 
 ### `update_llama.py`

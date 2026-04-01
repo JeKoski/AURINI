@@ -252,8 +252,12 @@ class Runner:
         self._assert_phase(RunnerPhase.CHECKS_DONE, "run_remedies")
         self.phase = RunnerPhase.REMEDYING
 
-        # Create the job log on the first system-modifying call
-        if self.job_log is None:
+        # Only create a remedy JobLog if there are actually remedies to apply.
+        # When approved_remedy_ids is empty (all checks passed, nothing to fix),
+        # no log is created here — execute() will create the install/update log
+        # directly. Creating an empty remedy log that never gets marked complete
+        # produces ghost jobs stuck as in_progress in the action log index.
+        if approved_remedy_ids and self.job_log is None:
             self.job_log = JobLog.create(
                 plugin_id=self.plugin.plugin_id,
                 instance_id=self.instance_id,
@@ -333,6 +337,17 @@ class Runner:
         # Determine next phase based on whether all checks now pass
         still_failing = [r for r in self._check_map.values() if not r.passed]
         self.phase = RunnerPhase.READY if not still_failing else RunnerPhase.BLOCKED
+
+        # Close out the remedy job log now that all remedies have been applied.
+        # It is a real job and must be marked complete (or failed) — leaving it
+        # in_progress produces ghost entries stuck forever in the action log index.
+        if self.job_log is not None and self.job_log.action == JobAction.REMEDY:
+            if any(not r.success for r in self._remedy_results):
+                self.job_log.mark_failed(
+                    error="One or more remedies failed. Check individual entries for details."
+                )
+            else:
+                self.job_log.mark_complete()
 
         return list(self._remedy_results)
 

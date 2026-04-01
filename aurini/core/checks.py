@@ -639,23 +639,49 @@ def disk_space_gte(
     """
     Check that available disk space at path is >= minimum_gb gigabytes.
 
+    If path does not exist yet (e.g. the install directory hasn't been created),
+    walks up to the nearest existing ancestor and checks that instead. This is
+    the normal case for a fresh install — the target directory won't exist until
+    the clone step runs.
+
     Always check before large downloads or builds — insufficient disk space
     causes confusing mid-install failures that are hard to diagnose.
     """
     p = Path(path).expanduser().resolve()
+
+    # Walk up to the nearest existing ancestor so statvfs has something to work with.
+    # The disk usage of the volume that will contain `p` is what we care about.
+    check_path = p
+    while not check_path.exists():
+        parent = check_path.parent
+        if parent == check_path:
+            # Reached filesystem root and nothing exists — shouldn't happen on a
+            # sane system, but fall back gracefully rather than looping forever.
+            break
+        check_path = parent
+
     try:
-        stat = shutil.disk_usage(p)
+        stat = shutil.disk_usage(check_path)
         available_gb = stat.free / (1024 ** 3)
+
+        # Tell the user which path was actually checked if it differs from the
+        # requested path — so they know what they're looking at.
+        location_note = (
+            f" (checked at {check_path}, nearest existing ancestor of {p})"
+            if check_path != p
+            else f" at {p}"
+        )
+
         if available_gb >= minimum_gb:
             return _ok(
                 check_id,
-                f"Available disk space at {p}: {available_gb:.1f} GB "
+                f"Available disk space{location_note}: {available_gb:.1f} GB "
                 f"(minimum required: {minimum_gb} GB).",
                 metadata={"available_gb": round(available_gb, 2)},
             )
         return _fail(
             check_id,
-            f"Not enough disk space at {p}. "
+            f"Not enough disk space{location_note}. "
             f"Available: {available_gb:.1f} GB, required: {minimum_gb} GB.",
             remedy_id=remedy_id,
             risk=risk,
@@ -664,7 +690,7 @@ def disk_space_gte(
     except Exception:
         return _fail(
             check_id,
-            f"Could not check disk space at {p}.",
+            f"Could not check disk space at {check_path}.",
             raw_output=traceback.format_exc(),
         )
 
