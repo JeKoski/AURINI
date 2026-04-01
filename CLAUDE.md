@@ -604,9 +604,14 @@ Plugin folders use hyphenated names (`llama-cpp`) for readability and consistenc
 - [x] `aurini/core/profile.py` — profile CRUD, launch settings, custom args, default management
 - [x] `aurini/core/__init__.py` — clean public exports for all core modules
 
+### Done - session 3
+- [x] `run_aurini.py` — end-to-end install script; first real hardware test on Arc A750, confirmed working
+- [x] `aurini/core/checks.py` — fixed disk_space_gte to walk up to nearest existing ancestor when install path doesn't exist yet
+- [x] `aurini/core/runner.py` — fixed ghost remedy jobs: only create remedy `JobLog` when remedies are actually applied; call `mark_complete()`/`mark_failed()` at end of `run_remedies()`
+
 ### Next session — start here
-- [ ] **First real end-to-end test on hardware** — wire Runner + Instance + Profile together against the actual llama-cpp plugin on the Arc A750. This is the first time all the pieces run as a system. Expect to find integration rough edges.
-- [ ] Root-owned build folder detection — detect if install path is owned by root and surface the chown fix before attempting build (noted in CLAUDE.md key decisions)
+- [ ] Launch script — run_launch.py equivalent of run_aurini.py for starting llama-server from a profile; needs build_launch_command() + build_launch_env() wired together with the setvars sourcing pattern from SENNI
+- [ ] Root-owned build folder detection (carry forward from before) — detect if install path is owned by root and surface the chown fix before attempting build (noted in CLAUDE.md key decisions)
 
 ### Remaining work
 - [ ] `backends/sycl_windows.py` — Intel Arc, Windows (`setvars.bat`, `CREATE_NO_WINDOW` — pattern exists in SENNI's `server.py`)
