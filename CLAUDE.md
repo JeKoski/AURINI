@@ -587,7 +587,7 @@ Plugin folders use hyphenated names (`llama-cpp`) for readability and consistenc
 
 ## TODO / Known Issues
 
-### Done this session
+### Done — session 1
 - [x] `aurini/core/base.py` — AuriniPlugin ABC, CheckResult, RemedyResult
 - [x] `aurini/core/checks.py` — core check library (20+ functions)
 - [x] `aurini/core/log.py` — action log, per-job files, reversion state machine
@@ -598,13 +598,17 @@ Plugin folders use hyphenated names (`llama-cpp`) for readability and consistenc
 - [x] `plugins/llama-cpp/backends/shared.py` — git, backup, build helpers
 - [x] `plugins/llama-cpp/backends/sycl_linux.py` — Intel Arc, Linux
 
+### Done — session 2
+- [x] `aurini/core/runner.py` — core runner: check → remedy → summary → execute flow, reversion, ties log.py in
+- [x] `aurini/core/instance.py` — instance CRUD, path resolution, build settings, managed vs custom paths
+- [x] `aurini/core/profile.py` — profile CRUD, launch settings, custom args, default management
+- [x] `aurini/core/__init__.py` — clean public exports for all core modules
+
 ### Next session — start here
-- [ ] **Core runner** — drives the check → remedy → summary → execute flow, ties log.py in, allows first real end-to-end test on hardware
-- [ ] Instance management (`aurini/core/instance.py`)
-- [ ] Profile management (`aurini/core/profile.py`)
+- [ ] **First real end-to-end test on hardware** — wire Runner + Instance + Profile together against the actual llama-cpp plugin on the Arc A750. This is the first time all the pieces run as a system. Expect to find integration rough edges.
+- [ ] Root-owned build folder detection — detect if install path is owned by root and surface the chown fix before attempting build (noted in CLAUDE.md key decisions)
 
 ### Remaining work
-- [ ] Detect if build folder is owned by root and suggest chown fix before attempting build
 - [ ] `backends/sycl_windows.py` — Intel Arc, Windows (`setvars.bat`, `CREATE_NO_WINDOW` — pattern exists in SENNI's `server.py`)
 - [ ] `backends/cuda_linux.py` — NVIDIA, Linux
 - [ ] `backends/cuda_windows.py` — NVIDIA, Windows
@@ -619,11 +623,8 @@ Plugin folders use hyphenated names (`llama-cpp`) for readability and consistenc
 - [ ] Profile portability between instances
 - [ ] Model file management (download, organise, delete)
 - [ ] Python runtime update UI (Settings → Components)
-- [ ] Retire `update_llama.py` once core runner is working end-to-end
+- [ ] Retire `update_llama.py` once first end-to-end test confirms core runner works
 
----
-
-## What Already Exists (Original Prototype)
 
 ### `update_llama.py`
 The original prototype of AURINI's llama.cpp plugin. Now superseded by the plugin architecture but kept for reference. The logic has been ported into `backends/sycl_linux.py` and `backends/shared.py`.
