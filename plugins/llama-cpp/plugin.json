@@ -1,0 +1,296 @@
+{
+  "id": "llama-cpp",
+  "name": "llama.cpp",
+  "version": "1.0.0",
+  "description": "High-performance local LLM inference engine with Intel Arc GPU support via SYCL.",
+  "author": "AURINI project",
+  "platforms": ["linux"],
+
+  "dependencies": [
+    {
+      "id": "oneapi",
+      "name": "Intel oneAPI",
+      "description": "Required for Intel Arc GPU acceleration via SYCL. Install 'intel-deep-learning-essentials' (recommended) or 'intel-basekit' from Intel's apt repository.",
+      "required": true,
+      "risk": "manual",
+      "auto_fixable": false,
+      "platforms": ["linux"]
+    }
+  ],
+
+  "checks": [
+    {
+      "id": "oneapi_present",
+      "type": "file_exists",
+      "description": "Intel oneAPI setvars.sh is present",
+      "path": "/opt/intel/oneapi/setvars.sh",
+      "on_fail": "remedy_install_oneapi"
+    },
+    {
+      "id": "git_present",
+      "type": "command_exists",
+      "description": "git is installed",
+      "command": "git",
+      "on_fail": "remedy_install_git"
+    },
+    {
+      "id": "cmake_present",
+      "type": "command_exists",
+      "description": "cmake is installed",
+      "command": "cmake",
+      "on_fail": "remedy_install_cmake"
+    },
+    {
+      "id": "render_group",
+      "type": "user_in_group",
+      "description": "Current user is in the 'render' group (required for Intel GPU access at runtime)",
+      "group": "render",
+      "on_fail": "remedy_add_render_group"
+    },
+    {
+      "id": "video_group",
+      "type": "user_in_group",
+      "description": "Current user is in the 'video' group (required for Intel GPU access at runtime)",
+      "group": "video",
+      "on_fail": "remedy_add_video_group"
+    },
+    {
+      "id": "disk_space",
+      "type": "disk_space_gte",
+      "description": "Enough disk space to clone and build llama.cpp (minimum 5 GB)",
+      "path": "~",
+      "minimum_gb": 5,
+      "on_fail": null
+    },
+    {
+      "id": "internet_reachable",
+      "type": "internet_reachable",
+      "description": "Internet connection available (needed to clone or update from GitHub)",
+      "on_fail": null
+    },
+    {
+      "id": "github_reachable",
+      "type": "host_reachable",
+      "description": "GitHub is reachable",
+      "host": "github.com",
+      "port": 443,
+      "on_fail": null
+    },
+    {
+      "id": "gpu_visible",
+      "type": "command_output_contains",
+      "description": "Intel Arc GPU is visible via sycl-ls (confirms drivers and oneAPI are working)",
+      "command": ["bash", "-c", "source /opt/intel/oneapi/setvars.sh --force intel64 2>/dev/null && sycl-ls"],
+      "expected_string": "level_zero:gpu",
+      "on_fail": "remedy_gpu_not_visible"
+    },
+    {
+      "id": "build_dir_writable",
+      "type": "directory_writable",
+      "description": "Install path is writable by the current user",
+      "path": null,
+      "note": "Path is set by the user during configure. Checked at pre-flight time against the chosen path.",
+      "on_fail": "remedy_build_dir_ownership"
+    }
+  ],
+
+  "remedies": [
+    {
+      "id": "remedy_install_oneapi",
+      "risk": "manual",
+      "auto_fixable": false,
+      "description": "Intel oneAPI must be installed manually.",
+      "instructions": [
+        "Add Intel's apt repository:",
+        "  wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null",
+        "  echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list",
+        "  sudo apt update",
+        "",
+        "Then install (recommended — smaller, has everything llama.cpp needs):",
+        "  sudo apt install intel-deep-learning-essentials",
+        "",
+        "Or install the full toolkit:",
+        "  sudo apt install intel-basekit",
+        "",
+        "Then run AURINI again."
+      ]
+    },
+    {
+      "id": "remedy_install_git",
+      "risk": "high",
+      "auto_fixable": true,
+      "description": "Install git via apt.",
+      "command": ["sudo", "apt", "install", "-y", "git"],
+      "undo_instructions": "sudo apt remove git"
+    },
+    {
+      "id": "remedy_install_cmake",
+      "risk": "high",
+      "auto_fixable": true,
+      "description": "Install cmake via apt.",
+      "command": ["sudo", "apt", "install", "-y", "cmake"],
+      "undo_instructions": "sudo apt remove cmake"
+    },
+    {
+      "id": "remedy_add_render_group",
+      "risk": "high",
+      "auto_fixable": true,
+      "description": "Add the current user to the 'render' group. A logout and login is required for the change to take effect.",
+      "command": ["sudo", "usermod", "-aG", "render", "$USER"],
+      "undo_instructions": "sudo gpasswd -d $USER render — then log out and back in."
+    },
+    {
+      "id": "remedy_add_video_group",
+      "risk": "high",
+      "auto_fixable": true,
+      "description": "Add the current user to the 'video' group. A logout and login is required for the change to take effect.",
+      "command": ["sudo", "usermod", "-aG", "video", "$USER"],
+      "undo_instructions": "sudo gpasswd -d $USER video — then log out and back in."
+    },
+    {
+      "id": "remedy_gpu_not_visible",
+      "risk": "manual",
+      "auto_fixable": false,
+      "description": "The Intel Arc GPU is not visible to the oneAPI stack.",
+      "instructions": [
+        "Common causes:",
+        "  · Intel GPU drivers not installed — try: sudo apt install intel-gpu-tools level-zero",
+        "  · User not in 'render' or 'video' groups — see checks above",
+        "  · oneAPI installation incomplete — try reinstalling intel-deep-learning-essentials",
+        "",
+        "You can continue the build without confirming GPU visibility, but llama.cpp",
+        "may not use your GPU when you try to run it."
+      ]
+    },
+    {
+      "id": "remedy_build_dir_ownership",
+      "risk": "high",
+      "auto_fixable": true,
+      "description": "The install directory is not writable. This usually means it was created by a previous run with sudo. Fix ownership so the current user can write to it.",
+      "command": ["sudo", "chown", "-R", "$USER:$USER", "{install_path}"],
+      "undo_instructions": "The original owner was root. To restore: sudo chown -R root:root {install_path}"
+    }
+  ],
+
+  "settings": [
+    {
+      "id": "fp16",
+      "label": "FP16 compute",
+      "flag": "-DGGML_SYCL_F16=ON",
+      "description": "Halves the VRAM used for compute buffers with negligible quality impact. Strongly recommended for Arc A750, A770, and other 8 GB cards. Has no effect on model weight quality — only intermediate GPU calculations.",
+      "type": "boolean",
+      "default": true,
+      "category": "performance",
+      "phase": "build"
+    },
+    {
+      "id": "flash_attn",
+      "label": "Flash Attention",
+      "flag": "--flash-attn",
+      "description": "Reduces VRAM usage during inference by computing attention more efficiently. Added recently — performance varies by model. Recommended for 8 GB cards running larger models.",
+      "type": "boolean",
+      "default": false,
+      "category": "memory",
+      "phase": "launch"
+    },
+    {
+      "id": "ctx_size",
+      "label": "Context size",
+      "flag": "--ctx-size",
+      "description": "Maximum number of tokens the model can work with at once. Higher values use more VRAM. 4096 is a safe default for 8 GB cards.",
+      "type": "integer",
+      "default": 4096,
+      "min": 512,
+      "max": 131072,
+      "category": "memory",
+      "phase": "launch"
+    },
+    {
+      "id": "gpu_layers",
+      "label": "GPU layers",
+      "flag": "--gpu-layers",
+      "description": "Number of model layers to offload to the GPU. Set to 99 to offload as many as possible (recommended). Reduce if you run out of VRAM.",
+      "type": "integer",
+      "default": 99,
+      "min": 0,
+      "max": 999,
+      "category": "performance",
+      "phase": "launch"
+    },
+    {
+      "id": "model_path",
+      "label": "Model",
+      "flag": "--model",
+      "description": "Path to the GGUF model file to load.",
+      "type": "path",
+      "default": null,
+      "category": "model",
+      "phase": "launch"
+    },
+    {
+      "id": "host",
+      "label": "Host",
+      "flag": "--host",
+      "description": "Address llama-server listens on. Use 127.0.0.1 to keep it local (recommended). Use 0.0.0.0 to allow connections from other devices on your network.",
+      "type": "string",
+      "default": "127.0.0.1",
+      "category": "server",
+      "phase": "launch"
+    },
+    {
+      "id": "port",
+      "label": "Port",
+      "flag": "--port",
+      "description": "Port llama-server listens on.",
+      "type": "integer",
+      "default": 8080,
+      "min": 1024,
+      "max": 65535,
+      "category": "server",
+      "phase": "launch"
+    },
+    {
+      "id": "threads",
+      "label": "CPU threads",
+      "flag": "--threads",
+      "description": "Number of CPU threads to use. Defaults to half the available threads — a safe balance between speed and system responsiveness.",
+      "type": "integer",
+      "default": null,
+      "note": "Defaults to half of os.cpu_count() at launch time if not set.",
+      "min": 1,
+      "max": 256,
+      "category": "performance",
+      "phase": "launch"
+    }
+  ],
+
+  "build_config": {
+    "cmake_flags": [
+      "-DGGML_SYCL=ON",
+      "-DGGML_SYCL_TARGET=INTEL",
+      "-DGGML_SYCL_DNN=ON",
+      "-DGGML_SYCL_GRAPH=ON",
+      "-DCMAKE_BUILD_TYPE=Release",
+      "-DCMAKE_C_COMPILER=icx",
+      "-DCMAKE_CXX_COMPILER=icpx"
+    ],
+    "notes": [
+      "icx/icpx must be passed explicitly even after sourcing setvars.sh.",
+      "Without them cmake may silently fall back to gcc/g++ and produce a broken SYCL build.",
+      "-DGGML_SYCL_F16 is controlled by the fp16 setting and added at build time.",
+      "-DGGML_SYCL_FLASH_ATTN is a build-time flag but flash_attn is a launch flag in llama.cpp — do not add it here."
+    ],
+    "oneapi_setvars": "/opt/intel/oneapi/setvars.sh",
+    "binary_path": "build/bin/llama-server"
+  },
+
+  "exposes": {
+    "binary_path": "build/bin/llama-server",
+    "http_service": {
+      "default_port": 8080,
+      "health_endpoint": "/health"
+    }
+  },
+
+  "requires_plugins": []
+}

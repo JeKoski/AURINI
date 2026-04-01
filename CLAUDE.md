@@ -127,6 +127,33 @@ If a plugin declares a Python version requirement that conflicts with the AURINI
 
 ---
 
+## Current Repository Structure
+
+```
+aurini/
+  __init__.py
+  core/
+    __init__.py
+    base.py       ← AuriniPlugin ABC, CheckResult, RemedyResult
+    checks.py     ← Core check library (20+ check functions)
+    log.py        ← Action log and reversion state machine
+    paths.py      ← Cross-OS path resolution, AURINI data dirs
+plugins/
+  __init__.py
+  llama-cpp/
+    __init__.py
+    plugin.json   ← Manifest: checks, remedies, settings, cmake flags
+    plugin.py     ← Thin dispatcher — detects platform/GPU, selects backend
+    backends/
+      __init__.py
+      base.py     ← LlamaCppBackend ABC
+      shared.py   ← git, backup, build helpers shared by all backends
+      sycl_linux.py ← Intel Arc (SYCL), Linux — fully implemented
+update_llama.py   ← Original prototype — superseded, can be retired eventually
+```
+
+---
+
 ## Plugin Architecture
 
 Each component (llama.cpp, Kokoro, Whisper, etc.) is a self-contained plugin living in its own subdirectory under `/plugins/`.
@@ -146,111 +173,63 @@ plugins/
   llama-cpp/
     plugin.json
     plugin.py
-  kokoro/
-    plugin.json
-    plugin.py
-  whisper/
+    backends/        ← one file per GPU vendor + OS combination
+      base.py
+      shared.py
+      sycl_linux.py
+  kokoro/            ← future
     plugin.json
     plugin.py
 ```
+
+### Backend pattern (llama-cpp and any compiled plugin)
+
+The llama-cpp plugin uses a backend dispatcher pattern rather than a single monolithic `plugin.py`. This is required because a single file handling Intel/NVIDIA/AMD across Linux/Windows/macOS would become unreadable fast — nested `if platform == ... and vendor == ...` branches in every method.
+
+**How it works:**
+- `plugin.py` is a thin dispatcher. It detects the OS and GPU vendor, selects the right backend, and delegates everything hardware-specific to it.
+- Each backend file (`sycl_linux.py`, `cuda_linux.py`, etc.) handles one platform+GPU combination and subclasses `LlamaCppBackend`.
+- `shared.py` contains everything that is identical across all backends: git clone/pull, backup, cmake invocation, binary verification.
+- Adding a new backend = one new file + one line in `_select_backend()`. Nothing else changes.
+
+**Registering a new backend:**
+1. Create `backends/<name>.py` subclassing `LlamaCppBackend` from `backends/base.py`
+2. Implement all abstract methods: `backend_id`, `display_name`, `get_checks()`, `run_check()`, `run_remedy()`, `cmake_flags()`, `env_setup_script()`, `build_launch_env()`, `binary_path()`
+3. Add an `elif` branch in `_select_backend()` in `plugin.py`
+4. Done — `plugin.py`, `shared.py`, and existing backends are untouched
+
+**Planned backends:**
+| Backend file | GPU | OS | Status |
+|---|---|---|---|
+| `sycl_linux.py` | Intel Arc / iGPU | Linux | ✔ Done |
+| `sycl_windows.py` | Intel Arc / iGPU | Windows | Planned |
+| `cuda_linux.py` | NVIDIA | Linux | Planned |
+| `cuda_windows.py` | NVIDIA | Windows | Planned |
+| `rocm_linux.py` | AMD | Linux | Planned |
+| `cpu.py` | CPU fallback | All | Planned |
 
 ### plugin.json — manifest schema
 
 The manifest is read by the GUI without executing any Python. It contains everything needed to display the plugin, its dependencies, its checks, its settings, and what it exposes to other plugins and apps.
 
+See `plugins/llama-cpp/plugin.json` for the full working example. Key sections:
+
 ```json
 {
   "id": "llama-cpp",
-  "name": "llama.cpp",
-  "version": "1.0.0",
-  "description": "High-performance local LLM inference engine.",
-  "author": "AURINI project",
-  "platforms": ["linux", "windows"],
-
-  "dependencies": [
-    {
-      "id": "oneapi",
-      "name": "Intel oneAPI",
-      "description": "Required for Intel Arc GPU acceleration via SYCL.",
-      "required": true,
-      "risk": "high",
-      "auto_fixable": false,
-      "platforms": ["linux", "windows"]
-    }
-  ],
-
-  "checks": [
-    {
-      "id": "oneapi_present",
-      "type": "file_exists",
-      "description": "oneAPI setvars.sh present",
-      "path": "/opt/intel/oneapi/setvars.sh",
-      "on_fail": "remedy_install_oneapi"
-    },
-    {
-      "id": "gpu_visible",
-      "type": "command_output_contains",
-      "description": "GPU visible via sycl-ls",
-      "command": "sycl-ls",
-      "expected_string": "level_zero:gpu",
-      "on_fail": "remedy_gpu_not_visible"
-    }
-  ],
-
-  "settings": [
-    {
-      "id": "fp16",
-      "label": "FP16 compute",
-      "flag": "-DGGML_SYCL_F16=ON",
-      "description": "Halves VRAM used for compute buffers with negligible quality impact. Recommended for Arc A750/A770 and similar 8GB cards.",
-      "type": "boolean",
-      "default": true,
-      "category": "performance",
-      "phase": "build"
-    },
-    {
-      "id": "flash_attn",
-      "label": "Flash Attention",
-      "flag": "--flash-attn",
-      "description": "Reduces VRAM usage during inference. Recommended for cards with 8GB or less.",
-      "type": "boolean",
-      "default": false,
-      "category": "memory",
-      "phase": "launch"
-    },
-    {
-      "id": "ctx_size",
-      "label": "Context size",
-      "flag": "--ctx-size",
-      "description": "Maximum number of tokens the model can work with at once. Higher values use more VRAM.",
-      "type": "integer",
-      "default": 4096,
-      "min": 512,
-      "max": 131072,
-      "category": "memory",
-      "phase": "launch"
-    },
-    {
-      "id": "model_path",
-      "label": "Model",
-      "flag": "--model",
-      "description": "Path to the model file to load.",
-      "type": "path",
-      "default": null,
-      "category": "model",
-      "phase": "launch"
-    }
-  ],
-
-  "exposes": {
-    "binary_path": "bin/llama-server",
-    "http_service": {
-      "default_port": 8080,
-      "health_endpoint": "/health"
-    }
+  "platforms": ["linux"],
+  "checks": [...],
+  "remedies": [...],
+  "settings": [...],
+  "build_config": {
+    "cmake_flags": [...],
+    "oneapi_setvars": "/opt/intel/oneapi/setvars.sh",
+    "binary_path": "build/bin/llama-server"
   },
-
-  "requires_plugins": []
+  "exposes": {
+    "binary_path": "build/bin/llama-server",
+    "http_service": { "default_port": 8080, "health_endpoint": "/health" }
+  }
 }
 ```
 
@@ -282,49 +261,33 @@ Every setting shows:
 - **Enabled toggle** — every setting (preset or custom) can be disabled without being deleted. Disabled settings are shown but not passed to the process. This handles deprecated flags, renamed flags, compatibility issues, and format changes without losing the user's configured value
 - **Value** — the input widget appropriate to the type
 
-The enabled/disabled toggle is separate from the value. A user can disable `--flash-attn` without clearing the setting, then re-enable it later. This also handles the case where a flag is renamed or its format changes — the user disables the old preset and adds the corrected flag as a custom argument while keeping both visible for reference.
-
 ### Custom arguments
 
 Every plugin instance has a custom arguments section below the presets. Users can add arbitrary key/value pairs (or bare flags) that are passed through as-is. AURINI does not validate custom args — it passes them along and records their use in the action log. Custom args follow the same enabled/disabled toggle pattern as presets.
 
 ### plugin.py — interface contract
 
-Every plugin module must implement the `AuriniPlugin` base class provided by `aurini_core`. The core calls these methods in sequence and collects structured result objects. The core does not care how the plugin implements its logic — only that it returns the right structures.
+Every plugin module must implement the `AuriniPlugin` base class from `aurini/core/base.py`.
 
 ```python
-from aurini_core import AuriniPlugin, CheckResult, RemedyResult
+from aurini.core.base import AuriniPlugin, CheckResult, RemedyResult
 
 class Plugin(AuriniPlugin):
-
-    def get_checks(self) -> list[str]:
-        """Return ordered list of check IDs this plugin wants the core to run."""
-        ...
-
-    def run_check(self, check_id: str) -> CheckResult:
-        """Run a single check. Must return CheckResult regardless of outcome."""
-        ...
-
-    def run_remedy(self, remedy_id: str) -> RemedyResult:
-        """Attempt a remedy. Must return RemedyResult with undo instructions."""
-        ...
-
-    def install(self, config: dict) -> None:
-        """Execute the install flow. Only called after all checks pass and user confirms."""
-        ...
-
-    def uninstall(self) -> None:
-        """Remove everything AURINI installed for this instance. Must be clean and complete."""
-        ...
-
-    def build_launch_command(self, profile: dict) -> list[str]:
-        """Construct the launch command for a given profile. Returns argv list."""
-        ...
+    def get_checks(self) -> list[str]: ...
+    def run_check(self, check_id: str) -> CheckResult: ...
+    def run_remedy(self, remedy_id: str) -> RemedyResult: ...
+    def install(self, config: dict) -> None: ...
+    def update(self, config: dict) -> None: ...
+    def uninstall(self) -> None: ...
+    def build_launch_command(self, profile: dict) -> list[str]: ...
 ```
 
-### CheckResult interface
+**Important:** Plugins with multiple backends should also expose:
+- `set_job_log(job_log)` — inject the JobLog before any system-modifying call
+- `set_install_path(path)` — update install path after construction
+- `build_launch_env(base_env)` — return hardware-specific environment dict for launch
 
-Every check — whether using a core library type or a custom plugin callable — must return a `CheckResult`:
+### CheckResult interface
 
 ```python
 @dataclass
@@ -332,12 +295,11 @@ class CheckResult:
     check_id: str
     passed: bool
     message: str          # Human-readable interpreted result
-    raw_output: str       # Full raw command output — never discarded, always shown on request
-    remedy_id: str | None # Which remedy to offer if failed
+    raw_output: str       # Full raw command output — never discarded
+    remedy_id: str | None
     risk: str | None      # "low" | "high" | "manual"
+    metadata: dict        # Optional structured data for plugin-internal use
 ```
-
-`raw_output` is non-negotiable. The GUI must always offer to show it. This is what the user searches when something breaks in a way AURINI doesn't recognise — including cases where tool output format has changed.
 
 ### RemedyResult interface
 
@@ -346,49 +308,85 @@ class CheckResult:
 class RemedyResult:
     remedy_id: str
     success: bool
-    message: str           # What was done in plain English
-    undo_instructions: str # How to reverse it — always required
-    raw_output: str        # Full output of any commands run
+    message: str
+    undo_instructions: str  # Always required — never nullable
+    raw_output: str
 ```
 
 ---
 
-## Core Check Library
+## Action Log
 
-The core provides a standard library of check types that plugins can use declaratively in `plugin.json`. Plugins may also provide custom callables in `plugin.py` for anything the library doesn't cover. Both approaches are supported and can be mixed within a single plugin.
+Every action AURINI takes against the system is recorded in `aurini/core/log.py`.
 
-### System identity
-- `os_is` — check OS type (linux, windows, macos)
-- `arch_is` — check CPU architecture (x86_64, arm64)
+### Key design decisions
 
-### Hardware
-- `gpu_vendor_is` — check GPU vendor (intel, nvidia, amd, apple)
-- `gpu_vram_gte` — check VRAM >= N GB
-- `gpu_visible` — check GPU is visible via toolkit command (sycl-ls, nvidia-smi, rocm-smi); checks output string, not just exit code
+**Log per job, not a global append-only log.** Each install/update/uninstall is a `JobLog` with its own file. When all entries in a job are reverted, that job is fully undone. A global index (`index.json`) lists all jobs for the GUI. Drilling into a job shows the full entry list.
 
-### User permissions
-- `user_in_group` — check user is in a system group
-- `directory_writable` — check a path is writable by the current user
-- `directory_readable` — check a path is readable
-- `can_run_without_sudo` — check a command runs without elevated privileges
+**Reversion is a state machine.** Jobs and individual entries both track reversion state:
+- Job: `not_started` → `in_progress` → `awaiting_user` → `complete` / `partially_reverted`
+- Entry: `pending` → `in_progress` → `awaiting_user` → `complete` / `failed` / `skipped`
 
-### Software presence
-- `file_exists` — check a file or directory exists at a path
-- `command_exists` — check a command is on PATH
-- `command_succeeds` — check a command exits with code 0
-- `command_output_contains` — check command output contains an expected string. Preferred over bare `command_succeeds` for tool detection — a command can exit 0 while not returning what we expect
-- `version_gte` — check a tool's version meets a minimum requirement. Version string parsing handled by core shared utilities — not reimplemented per plugin
-- `python_package_installed` — check a Python package is available in a given environment
-- `process_running` — check a named process is currently running
+**Reversion always walks entries in reverse order.** Entry IDs are immutable and never renumbered. Skipped entries stay in the list marked as skipped — they are never removed.
 
-### Network and disk
-- `internet_reachable` — basic connectivity check
-- `host_reachable` — check a specific host is reachable (for download sources)
-- `disk_space_gte` — check available disk space at a path >= N GB. Easy to forget, causes confusing mid-install failures — always check before any large download or build
+**`awaiting_user` enables pause/resume.** When a manual step requires the user to act (e.g. logout/login after group change), reversion pauses with `awaiting_user`. On next AURINI startup, `find_incomplete_reversions()` detects these and surfaces them immediately.
 
-### Runtime state
-- `port_in_use` — check whether a port is bound
-- `lock_file_present` — check for a lock file (detect another instance already running)
+**Atomic writes.** Every state change writes via temp file + rename. A crash mid-write leaves the previous file intact rather than producing corrupt JSON.
+
+**Directory layout:**
+```
+~/aurini/logs/
+  index.json
+  jobs/
+    2026-04-01_14-32-07_llama-cpp-arc_install.json
+    2026-04-01_15-10-22_llama-cpp-arc_update.json
+```
+
+### Revert types
+
+| Type | Meaning |
+|---|---|
+| `AUTO` | AURINI can run the revert command — still requires explicit user confirmation |
+| `MANUAL` | AURINI cannot run it — surfaces instructions, waits for user to confirm done |
+
+`AUTO` means AURINI *can* run the reversal, not that it does so silently. Confirmation is always required.
+
+---
+
+## Cross-OS Path Handling (`aurini/core/paths.py`)
+
+Each instance stores paths per OS in a dict: `{"linux": "~/llama.cpp", "windows": "C:/llama.cpp", "macos": null}`.
+
+Key functions:
+- `current_os()` → `OsKey` (LINUX / WINDOWS / MACOS)
+- `resolve_path(paths)` → `Path | None` — expands `~`, returns None if not configured
+- `resolve_path_strict(paths, instance_id)` → `Path` — raises with clear message if not configured
+- `set_path(paths, value)` → new dict (immutable — never mutates input)
+- `make_path_record(linux, windows, macos)` → fresh per-OS dict
+- `configured_os_keys(paths)` / `missing_os_keys(paths)` — for UI display
+
+**`~` is preserved in stored strings** and only expanded at resolve time. This keeps records portable across user accounts and machines.
+
+**AURINI data directories** (from `paths.py`):
+- Linux/macOS: `~/aurini/`
+- Windows: `%APPDATA%/aurini/`
+
+Subdirectories: `logs/`, `instances/`, `runtime/python/`
+
+---
+
+## Core Check Library (`aurini/core/checks.py`)
+
+20+ ready-to-use check functions. All return `CheckResult`, never raise.
+
+**System identity:** `os_is`, `arch_is`
+**Hardware:** `gpu_vendor_is`, `gpu_visible`
+**User permissions:** `user_in_group`, `directory_writable`, `directory_readable`, `can_run_without_sudo`
+**Software presence:** `file_exists`, `command_exists`, `command_succeeds`, `command_output_contains`, `version_gte`, `python_package_installed`, `process_running`
+**Network and disk:** `internet_reachable`, `host_reachable`, `disk_space_gte`
+**Runtime state:** `port_in_use`, `lock_file_present`
+
+`gpu_visible` accepts `env_setup_command` for cases where the toolkit must be sourced first (e.g. oneAPI before sycl-ls). `version_gte` stores the detected version string in `metadata` so later steps can read it without re-running the command. All string matching is case-insensitive.
 
 ---
 
@@ -398,13 +396,13 @@ A **plugin** is a template. An **instance** is a concrete installation.
 
 Each instance has:
 - A user-given name (e.g. "llama.cpp — Arc", "llama.cpp — RTX")
-- Its own install path
+- Its own install path (per OS, via `paths.py`)
 - Its own build-phase settings (compile flags)
 - Its own set of profiles (launch-phase settings)
-- Per-OS paths (see Cross-OS section below)
 - Its own managed venv (for Python-based plugins)
+- AURINI metadata directory at `~/aurini/instances/<instance_id>/`
 
-The install path can be either AURINI managed (default — AURINI creates and owns the directory) or custom (user specifies a path, including existing installations). In both cases AURINI manages the instance identically — the distinction is only where the files live on disk. AURINI's own metadata for the instance (profiles, build config, action log) always lives in the AURINI managed path regardless of where the install itself is.
+The install path can be AURINI managed (default) or custom (user specifies a path, including existing installations). AURINI's metadata for the instance always lives in the AURINI managed path regardless of where the install itself is.
 
 ### Instance data structure
 
@@ -417,7 +415,8 @@ The install path can be either AURINI managed (default — AURINI creates and ow
   "path_mode": "custom",
   "paths": {
     "linux": "~/llama.cpp/",
-    "windows": "C:/llama.cpp/"
+    "windows": "C:/llama.cpp/",
+    "macos": null
   },
   "aurini_managed_paths": {
     "linux": "~/aurini/instances/llama-cpp-arc/",
@@ -434,34 +433,20 @@ The install path can be either AURINI managed (default — AURINI creates and ow
 
 ### Inter-plugin references
 
-Plugins reference each other by instance ID, not by path. AURINI resolves paths at runtime. This means a user installing SENNI via AURINI never has to copy-paste paths — AURINI knows where everything is because it installed it.
-
-The `exposes` block in `plugin.json` tells AURINI (and other plugins) what an instance makes available:
-
-```json
-"exposes": {
-  "binary_path": "bin/llama-server",
-  "http_service": {
-    "default_port": 8080,
-    "health_endpoint": "/health"
-  }
-}
-```
-
-External apps (e.g. SENNI running outside AURINI) can also reference AURINI-managed instances — they just need the path or port, which AURINI can display prominently and offer to copy to clipboard.
+Plugins reference each other by instance ID, not by path. AURINI resolves paths at runtime via `paths.py`.
 
 ### Known instance model limitations (design for these later)
 
-- **External installs** — if the user installs something outside AURINI, AURINI doesn't know about it. An "import existing installation" flow is needed eventually
-- **Profile portability** — copying a profile between instances (e.g. Arc → RTX) requires handling flags that are backend-specific. Copy what's compatible, flag what isn't
-- **Simple user path** — one instance created automatically, instance management hidden until the user creates a second one. Never let instance complexity leak into the default experience
-- **Custom path adoption** — when pointing AURINI at an existing installation, it must detect existing files, back up before touching anything, and offer to adopt (manage in place) vs. reinstall clean. Never silently overwrite an existing directory
+- **External installs** — import existing installation flow needed
+- **Profile portability** — copy compatible settings, flag incompatible ones between instances
+- **Simple user path** — one instance created automatically, management hidden until second is created
+- **Custom path adoption** — detect existing files, back up before touching, offer adopt vs reinstall
 
 ---
 
 ## Profiles
 
-A profile is a named snapshot of all `launch`-phase settings for a plugin instance. Profiles are the primary way users manage different use cases — different models, different quality/speed tradeoffs, different hardware targets.
+A profile is a named snapshot of all `launch`-phase settings for a plugin instance.
 
 ### Profile data structure
 
@@ -473,22 +458,10 @@ A profile is a named snapshot of all `launch`-phase settings for a plugin instan
   "created": "2026-04-01T14:32:07Z",
   "is_default": true,
   "settings": {
-    "model_path": {
-      "enabled": true,
-      "value": "~/models/gemma-27b-q4.gguf"
-    },
-    "ctx_size": {
-      "enabled": true,
-      "value": 8192
-    },
-    "flash_attn": {
-      "enabled": true,
-      "value": true
-    },
-    "gpu_layers": {
-      "enabled": true,
-      "value": 99
-    }
+    "model_path": { "enabled": true, "value": "~/models/gemma-27b-q4.gguf" },
+    "ctx_size":   { "enabled": true, "value": 8192 },
+    "flash_attn": { "enabled": true, "value": true },
+    "gpu_layers": { "enabled": true, "value": 99 }
   },
   "custom_args": [
     { "flag": "--threads", "value": "6", "enabled": true }
@@ -496,66 +469,11 @@ A profile is a named snapshot of all `launch`-phase settings for a plugin instan
 }
 ```
 
-### Profile behaviour
-
-- Every instance has at least one profile. A default profile is created at install time
-- One profile is marked as default per instance — used when launching without explicitly choosing
-- Switching profiles is instant — no restart required until the next launch
-- Changing a profile does not affect other profiles
-- Import/export supported — users can share profiles or back them up
-- **The model path lives in the profile, not the instance** — this is what makes switching between Gemma and Qwen practical. The entire launch configuration including the model is captured in the profile
-
-### Profile operations
-
-All of these must be smooth and non-destructive:
-- Create new profile (blank or duplicated from existing)
-- Rename, add/edit notes
-- Edit settings within a profile
-- Set as default
-- Duplicate
-- Delete (with confirmation — cannot delete the last profile)
-- Export to file
-- Import from file
-
----
-
-## Cross-OS Path Handling
-
-Each instance stores paths per OS. AURINI resolves the correct path for the current OS at runtime.
-
-If a path isn't configured for the current OS, AURINI prompts the user to set it up rather than silently failing. This supports users who run from a shared drive across OS installations — configure both paths once and AURINI just works on either OS.
-
-SENNI already handles this correctly in its own config — the same pattern applies here at the instance level.
-
----
-
-## Managed Environments
-
-AURINI owns isolated environments for each plugin instance it manages. Users never interact with system-level package managers or Python environments directly.
-
-- **Compiled binary plugins** (e.g. llama.cpp): AURINI owns the build directory and output binaries
-- **Python-based plugins** (e.g. Kokoro, Whisper): AURINI provisions and owns a dedicated venv per instance, using the AURINI-managed Python runtime
-- The user's existing Python installation and any other environments are never touched
-- Uninstall is clean: AURINI removes its managed directory and nothing else
-
-**Implementation note:** The venv management system will be designed and implemented when the first Python-based plugin (likely Kokoro or Whisper) requires it. The llama.cpp plugin is a compiled binary and won't exercise this path. This is intentional — we'll learn from the llama.cpp plugin before designing the venv layer.
-
----
-
-## Action Log
-
-Every action AURINI takes against the system during a session is recorded in a human-readable action log. The log is:
-- Visible to the user in the GUI at any time
-- Written to disk so it survives a crash
-- Used to drive the undo/revert flow
-
-Each log entry includes: timestamp, action taken, plugin/instance that requested it, outcome, and undo instructions where applicable. Custom argument usage is always noted in the log.
+**The model path lives in the profile, not the instance.** This is what makes switching between Gemma and Qwen practical — the entire launch configuration is captured in the profile.
 
 ---
 
 ## Install Flow State Machine
-
-Every install/update flow follows this sequence. No stage can be skipped.
 
 ```
 DETECT
@@ -570,17 +488,7 @@ DETECT
                                       └─► RECOVER (preserve backups, explain failure, suggest fixes)
 ```
 
-### Summary screen — non-negotiable
-
-Shows before anything touches the system:
-- Hardware detected and confirmed
-- Each check: passed ✓ / fixed automatically ✓ / needs attention ⚠ / failed ✗
-- For anything fixed automatically: what was done and how to undo it
-- For anything needing attention: exactly what the user must do, with raw output available to view
-- Full list of what is about to happen
-- A single "Begin installation" confirmation button
-
-Nothing touches the system until that button is pressed.
+Nothing touches the system until the user presses "Begin installation" on the summary screen.
 
 ---
 
@@ -597,51 +505,9 @@ Detected at startup, presented to user for confirmation before doing anything:
 | None / unknown | CPU | Nothing extra |
 
 Detection methods:
-- Linux: `lspci` output
-- Windows: WMIC query
-- macOS: `system_profiler`
-
----
-
-## What Already Exists
-
-### `update_llama.py`
-Located at `installation/update_llama.py` in the SENNI repo. This is the prototype of AURINI's llama.cpp plugin — it handles the full install/update flow for Intel Arc on Linux. It represents the pattern that all AURINI plugins should follow.
-
-**What it does:**
-1. Asks install vs update, validates path
-2. Checks oneAPI is present — if not, shows install instructions (recommends Intel Deep Learning Essentials over full Base Toolkit)
-3. Checks render/video group membership — warns if missing with fix command
-4. Checks git and cmake
-5. Asks parallel build jobs (auto-detects safe default = half CPU cores, allows override)
-6. Asks Flash Attention preference (default: off)
-7. Asks FP16 preference (default: on — important for 8GB VRAM cards like Arc A750/A770)
-8. Detects both untracked files AND modified tracked files before pulling
-9. Backs up everything to `~/llama.cpp_backup_YYYY-MM-DD_HH-MM-SS/`
-10. Resets modified tracked files (`git checkout .` + `git clean -fd`) so pull proceeds cleanly
-11. Shows full summary of what was found and what will happen — **nothing has changed yet at this point**
-12. User confirms before anything touches the system
-13. Git clone or pull
-14. Runs `sycl-ls` to verify GPU is visible before starting a long build
-15. Sources oneAPI, runs cmake with exact flags, builds
-16. On failure: preserves backups, explains what went wrong, suggests fixes
-17. On success: shows binary location, reminds about backup folder
-
-**Exact cmake flags used (Intel Arc, Linux):**
-```
--DGGML_SYCL=ON
--DGGML_SYCL_TARGET=INTEL
--DGGML_SYCL_DNN=ON
--DGGML_SYCL_GRAPH=ON
--DGGML_SYCL_F16=ON  (default, user can disable)
--DCMAKE_BUILD_TYPE=Release
--DCMAKE_C_COMPILER=icx
--DCMAKE_CXX_COMPILER=icpx
-```
-
-**oneAPI path (standard install):** `/opt/intel/oneapi/setvars.sh`
-
-**Known hardware:** Developer uses Intel Arc A750 (8GB VRAM) on Ubuntu. FP16 is important for this card — halves VRAM usage for compute buffers without affecting model weight quality.
+- Linux: `lspci` output — checks VGA, 3D controller, display controller lines. NVIDIA and AMD checked before Intel to correctly identify discrete GPUs on systems with Intel integrated graphics.
+- Windows: WMIC query (planned)
+- macOS: `system_profiler` (planned)
 
 ---
 
@@ -662,11 +528,17 @@ Every setting (preset or custom) has an enabled/disabled toggle independent of i
 ### Profiles own the model path
 The model path is a per-profile setting, not a per-instance setting. This is what makes switching between different models (Gemma, Qwen, etc.) practical — the entire launch configuration including the model is captured in the profile, and switching profiles is instant.
 
+### Backend dispatcher pattern
+A single plugin.py handling all GPU vendors and OSes would become unreadable fast. The dispatcher selects a backend based on detected platform+GPU. Each backend handles one combination. shared.py contains everything identical across backends. Adding a new backend = one new file + one line in the dispatcher. See "Backend pattern" section above.
+
 ### Backup modified tracked files, not just untracked
 Git's `status --porcelain` returns both untracked (`??`) and locally modified tracked files (`M`). Early versions of `update_llama.py` only backed up untracked files — this caused a real failure when `examples/sycl/build.sh` (a repo file the developer had modified) blocked `git pull`. Both types must be backed up before any git operation, then modified tracked files reset with `git checkout .`.
 
 ### Timestamp on backup folders
 `llama.cpp_backup_2026-04-01_14-32-07` not `llama.cpp_backup_2026-04-01`. Running the installer twice in a day would silently overwrite the first backup otherwise.
+
+### Log per job with state machine reversion
+A global append-only log makes undo ordering complex. Per-job files with a reversion state machine make it clear: when all entries in a job are reverted, that job is fully undone. Reversion can pause (`awaiting_user`) for manual steps (e.g. logout/login) and resume on next AURINI startup. Entries are never renumbered or removed — skipped entries stay in the list marked skipped.
 
 ### FP16 default ON
 Most users running local models have consumer cards with limited VRAM (8-12GB). FP16 halves compute buffer VRAM usage with negligible quality impact. Defaulting it off would be wrong for the majority of users.
@@ -692,6 +564,9 @@ Any change to the plugin contract (`CheckResult`, `RemedyResult`, `AuriniPlugin`
 ### Shared Python, venvs for isolation
 One AURINI-managed Python runtime shared across all plugins. Venvs provide package isolation per instance. Per-instance Python versions are a future feature — not built upfront as version conflicts are rare in the local AI tooling space.
 
+### Hyphenated plugin folder names and importlib
+Plugin folders use hyphenated names (`llama-cpp`) for readability and consistency with plugin IDs. Python cannot import hyphenated names with a standard `import` statement. The core must load plugins via `importlib.util.spec_from_file_location()`. This is the correct pattern anyway since plugins are discovered dynamically at runtime — hyphenation just makes it explicit that plugins are not regular Python packages. Test harnesses must also use this pattern (register module stubs with `sys.modules` before loading).
+
 ---
 
 ## Critical Working Rules
@@ -702,6 +577,7 @@ One AURINI-managed Python runtime shared across all plugins. Venvs provide packa
 - **Never ask the user to remember to do things** at specific times — ADHD means this won't work. Automate it or build it into existing flows instead.
 - **Suggest Extended Thinking and/or Opus** when the architecture is genuinely uncertain or a wrong call would cause cascading problems. For most feature work, standard Sonnet is fine.
 - **Plugin interface is the blast radius boundary** — flag any change to the plugin contract explicitly before proceeding.
+- **Backend dispatcher pattern is the blast radius boundary for backends** — flag any change to `LlamaCppBackend` ABC explicitly before proceeding.
 - **Keep Python files single-responsibility and small.** One file per plugin, one file per major core concern. If a file is getting long, that's a signal to split before it becomes a problem.
 - **Architecture decisions go in CLAUDE.md with reasoning, not just the decision.** Future sessions won't have this conversation's context — the *why* is as important as the *what*.
 - **End every session by updating CLAUDE.md and any relevant design docs.** This is non-negotiable — it's what makes the next session productive.
@@ -711,25 +587,62 @@ One AURINI-managed Python runtime shared across all plugins. Venvs provide packa
 
 ## TODO / Known Issues
 
+### Done this session
+- [x] `aurini/core/base.py` — AuriniPlugin ABC, CheckResult, RemedyResult
+- [x] `aurini/core/checks.py` — core check library (20+ functions)
+- [x] `aurini/core/log.py` — action log, per-job files, reversion state machine
+- [x] `aurini/core/paths.py` — cross-OS path resolution, AURINI data dirs
+- [x] `plugins/llama-cpp/plugin.json` — full manifest
+- [x] `plugins/llama-cpp/plugin.py` — thin dispatcher with backend detection
+- [x] `plugins/llama-cpp/backends/base.py` — LlamaCppBackend ABC
+- [x] `plugins/llama-cpp/backends/shared.py` — git, backup, build helpers
+- [x] `plugins/llama-cpp/backends/sycl_linux.py` — Intel Arc, Linux
+
+### Next session — start here
+- [ ] **Core runner** — drives the check → remedy → summary → execute flow, ties log.py in, allows first real end-to-end test on hardware
+- [ ] Instance management (`aurini/core/instance.py`)
+- [ ] Profile management (`aurini/core/profile.py`)
+
+### Remaining work
 - [ ] Detect if build folder is owned by root and suggest chown fix before attempting build
-- [ ] Windows support for llama.cpp SYCL path (`setvars.bat`, `CREATE_NO_WINDOW` — pattern exists in SENNI's `server.py`)
-- [ ] NVIDIA/AMD/CPU build paths
-- [ ] Uninstall/reinstall flows
+- [ ] `backends/sycl_windows.py` — Intel Arc, Windows (`setvars.bat`, `CREATE_NO_WINDOW` — pattern exists in SENNI's `server.py`)
+- [ ] `backends/cuda_linux.py` — NVIDIA, Linux
+- [ ] `backends/cuda_windows.py` — NVIDIA, Windows
+- [ ] `backends/rocm_linux.py` — AMD, Linux
+- [ ] `backends/cpu.py` — CPU fallback, all platforms
 - [ ] GUI layer (Tauri)
-- [ ] `aurini_core` base classes (`AuriniPlugin`, `CheckResult`, `RemedyResult`) — **start here**
-- [ ] Core check library implementation
-- [ ] Action log implementation
-- [ ] Profile management implementation
-- [ ] Instance management implementation
-- [ ] llama.cpp plugin (port from `update_llama.py`)
 - [ ] SENNI plugin
 - [ ] Kokoro TTS plugin (planned — important for SENNI)
 - [ ] Managed venv system (implement when first Python-based plugin requires it)
-- [ ] Per-instance Python versions (future — implement only if version conflict cases emerge)
+- [ ] Per-instance Python versions (future — only if version conflict cases emerge)
 - [ ] "Import existing installation" flow for externally installed components
-- [ ] Profile portability between instances (copy compatible settings, flag incompatible ones)
+- [ ] Profile portability between instances
 - [ ] Model file management (download, organise, delete)
 - [ ] Python runtime update UI (Settings → Components)
+- [ ] Retire `update_llama.py` once core runner is working end-to-end
+
+---
+
+## What Already Exists (Original Prototype)
+
+### `update_llama.py`
+The original prototype of AURINI's llama.cpp plugin. Now superseded by the plugin architecture but kept for reference. The logic has been ported into `backends/sycl_linux.py` and `backends/shared.py`.
+
+**Exact cmake flags used (Intel Arc, Linux):**
+```
+-DGGML_SYCL=ON
+-DGGML_SYCL_TARGET=INTEL
+-DGGML_SYCL_DNN=ON
+-DGGML_SYCL_GRAPH=ON
+-DGGML_SYCL_F16=ON  (default, user can disable)
+-DCMAKE_BUILD_TYPE=Release
+-DCMAKE_C_COMPILER=icx
+-DCMAKE_CXX_COMPILER=icpx
+```
+
+**oneAPI path (standard install):** `/opt/intel/oneapi/setvars.sh`
+
+**Known hardware:** Developer uses Intel Arc A750 (8GB VRAM) on Ubuntu. FP16 is important for this card — halves VRAM usage for compute buffers without affecting model weight quality.
 
 ---
 
@@ -745,7 +658,7 @@ shell_args = {"shell": True, "executable": "/bin/bash"}
 env["ONEAPI_DEVICE_SELECTOR"] = "level_zero:gpu"
 ```
 
-The `exec` replaces the shell with llama-server so the PID is the actual target process (important for clean shutdown).
+The `exec` replaces the shell with llama-server so the PID is the actual target process (important for clean shutdown). AURINI implements the equivalent via `build_launch_env()` setting `ONEAPI_DEVICE_SELECTOR` and the core runner wrapping the command with setvars sourcing.
 
 ---
 
@@ -754,4 +667,4 @@ The `exec` replaces the shell with llama-server so the PID is the actual target 
 - [llama.cpp SYCL backend docs](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/SYCL.md)
 - [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html)
 - [Tauri docs](https://tauri.app/start/)
-- [SENNI repo](https://github.com/sdesser/senni) — see `scripts/config.py` for hardware detection, `scripts/server.py` for launch logic, `installation/update_llama.py` for the llama.cpp installer prototype
+- [SENNI repo](https://github.com/sdesser/senni) — see `scripts/config.py` for hardware detection, `scripts/server.py` for launch logic, `installation/update_llama.py` for the original llama.cpp installer prototype

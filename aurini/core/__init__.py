@@ -1,0 +1,1 @@
+# aurini.core — framework internals
