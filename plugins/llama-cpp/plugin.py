@@ -74,10 +74,15 @@ def _select_backend(
         )
 
     if system == "Windows":
-        # Future: SyclWindowsBackend, CudaWindowsBackend
+        vendor = _detect_gpu_vendor_windows()
+        if vendor == "intel":
+            from plugins.llama_cpp.backends.sycl_windows import SyclWindowsBackend
+            return SyclWindowsBackend(install_path=install_path, job_log=job_log)
+        # Future: NVIDIA → CudaWindowsBackend
         raise RuntimeError(
-            "Windows support for llama.cpp is not yet implemented in AURINI.\n"
-            "It is planned — check back soon."
+            f"No llama.cpp backend available for GPU vendor '{vendor}' on Windows yet.\n"
+            "Currently supported: Intel Arc (SYCL).\n"
+            "NVIDIA (CUDA) support is coming."
         )
 
     if system == "Darwin":
@@ -119,6 +124,59 @@ def _detect_gpu_vendor_linux() -> str:
     except Exception:
         return "unknown"
 
+def _detect_gpu_vendor_windows() -> str:
+    """
+    Detect the primary GPU vendor on Windows via wmic.
+
+    Returns: "intel" | "nvidia" | "amd" | "unknown"
+    Queries Win32_VideoController Name field for all display adapters.
+    NVIDIA and AMD are checked before Intel to correctly identify discrete
+    GPUs on systems that also have Intel integrated graphics — the same
+    priority order as _detect_gpu_vendor_linux().
+
+    Intel check requires "arc", "iris", or "uhd" in the name to avoid
+    false matches on generic Intel chipsets that have no GPU SYCL support.
+
+    Times out after 10 seconds if the command does not return.
+
+    Note: wmic is deprecated in Windows 10 21H1+ and may be removed in a
+    future Windows release. If detection stops working, replace with a
+    PowerShell query:
+        Get-WmiObject Win32_VideoController | Select-Object Name
+    Result is cached to avoid repeated slow wmic calls.
+    """
+    if hasattr(_detect_gpu_vendor_windows, "_cached_result"):
+        return _detect_gpu_vendor_windows._cached_result  # type: ignore
+
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["wmic", "path", "win32_VideoController", "get", "name"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            encoding="utf-8",
+            errors="replace",
+        )
+        output = result.stdout.lower()
+        vendor = "unknown"
+        for line in output.splitlines():
+            if "nvidia" in line:
+                vendor = "nvidia"
+                break
+            if "amd" in line or "radeon" in line or "advanced micro" in line:
+                vendor = "amd"
+                break
+            if "intel" in line and (
+                "arc" in line or "iris" in line or "uhd" in line
+            ):
+                vendor = "intel"
+                break
+    except Exception:
+        vendor = "unknown"
+
+    _detect_gpu_vendor_windows._cached_result = vendor  # type: ignore
+    return vendor
 
 # ── Plugin ─────────────────────────────────────────────────────────────────────
 

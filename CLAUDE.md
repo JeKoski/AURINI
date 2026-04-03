@@ -38,6 +38,7 @@ This is too much to expect from regular users. The Discord communities around lo
 - **Guided, not just documented** — don't just error out, explain what went wrong and what to do next
 - **Modular** — new components (Kokoro, Whisper, etc.) are self-contained plugins; the core tool provides the framework
 - **Instances are a power feature, not a UI burden** — the default path (one instance, created automatically) should feel invisible. Instance management surfaces only when the user needs it
+- **We don't assume anything about the user's system** — check everything that's needed, automate what we can, and guide the user through what we can't. Every dependency is explicitly verified, every remedy has a fallback, and manual steps always include clear instructions so the user can complete them and continue the automated flow.
 
 ### Auto-fix policy
 
@@ -134,22 +135,27 @@ aurini/
   __init__.py
   core/
     __init__.py
-    base.py       ← AuriniPlugin ABC, CheckResult, RemedyResult
-    checks.py     ← Core check library (20+ check functions)
-    log.py        ← Action log and reversion state machine
-    paths.py      ← Cross-OS path resolution, AURINI data dirs
+    base.py       <- AuriniPlugin ABC, CheckResult, RemedyResult
+    checks.py     <- Core check library (20+ check functions)
+    instance.py   <- Instance CRUD, path resolution, build settings
+    log.py        <- Action log and reversion state machine
+    paths.py      <- Cross-OS path resolution, AURINI data dirs
+    profile.py    <- Profile CRUD, launch settings, custom args
+    runner.py     <- Core runner: check -> remedy -> summary -> execute flow
 plugins/
   __init__.py
   llama-cpp/
     __init__.py
-    plugin.json   ← Manifest: checks, remedies, settings, cmake flags
-    plugin.py     ← Thin dispatcher — detects platform/GPU, selects backend
+    plugin.json   <- Manifest: checks, remedies, settings, cmake flags
+    plugin.py     <- Thin dispatcher — detects platform/GPU, selects backend
     backends/
       __init__.py
-      base.py     ← LlamaCppBackend ABC
-      shared.py   ← git, backup, build helpers shared by all backends
-      sycl_linux.py ← Intel Arc (SYCL), Linux — fully implemented
-update_llama.py   ← Original prototype — superseded, can be retired eventually
+      base.py          <- LlamaCppBackend ABC
+      shared.py        <- git, backup, build helpers shared by all backends
+      sycl_linux.py    <- Intel Arc (SYCL), Linux — fully implemented
+      sycl_windows.py  <- Intel Arc (SYCL), Windows — implemented, testing in progress
+run_aurini.py     <- End-to-end install/test script
+update_llama.py   <- Original prototype — superseded, can be retired eventually
 ```
 
 ---
@@ -173,11 +179,12 @@ plugins/
   llama-cpp/
     plugin.json
     plugin.py
-    backends/        ← one file per GPU vendor + OS combination
+    backends/        <- one file per GPU vendor + OS combination
       base.py
       shared.py
       sycl_linux.py
-  kokoro/            ← future
+      sycl_windows.py
+  kokoro/            <- future
     plugin.json
     plugin.py
 ```
@@ -193,7 +200,7 @@ The llama-cpp plugin uses a backend dispatcher pattern rather than a single mono
 - Adding a new backend = one new file + one line in `_select_backend()`. Nothing else changes.
 
 **Registering a new backend:**
-1. Create `backends/<name>.py` subclassing `LlamaCppBackend` from `backends/base.py`
+1. Create `backends/<n>.py` subclassing `LlamaCppBackend` from `backends/base.py`
 2. Implement all abstract methods: `backend_id`, `display_name`, `get_checks()`, `run_check()`, `run_remedy()`, `cmake_flags()`, `env_setup_script()`, `build_launch_env()`, `binary_path()`
 3. Add an `elif` branch in `_select_backend()` in `plugin.py`
 4. Done — `plugin.py`, `shared.py`, and existing backends are untouched
@@ -201,8 +208,8 @@ The llama-cpp plugin uses a backend dispatcher pattern rather than a single mono
 **Planned backends:**
 | Backend file | GPU | OS | Status |
 |---|---|---|---|
-| `sycl_linux.py` | Intel Arc / iGPU | Linux | ✔ Done |
-| `sycl_windows.py` | Intel Arc / iGPU | Windows | Planned |
+| `sycl_linux.py` | Intel Arc / iGPU | Linux | Done |
+| `sycl_windows.py` | Intel Arc / iGPU | Windows | Done (testing in progress) |
 | `cuda_linux.py` | NVIDIA | Linux | Planned |
 | `cuda_windows.py` | NVIDIA | Windows | Planned |
 | `rocm_linux.py` | AMD | Linux | Planned |
@@ -388,6 +395,8 @@ Subdirectories: `logs/`, `instances/`, `runtime/python/`
 
 `gpu_visible` accepts `env_setup_command` for cases where the toolkit must be sourced first (e.g. oneAPI before sycl-ls). `version_gte` stores the detected version string in `metadata` so later steps can read it without re-running the command. All string matching is case-insensitive.
 
+**Important:** `import grp` at the top of `checks.py` is wrapped in a try/except because `grp` is a Unix-only module. The `user_in_group` function guards against `grp is None` and returns a clear failure message on Windows. This pattern must be preserved — do not revert to an unconditional `import grp`.
+
 ---
 
 ## Instance Model
@@ -506,7 +515,7 @@ Detected at startup, presented to user for confirmation before doing anything:
 
 Detection methods:
 - Linux: `lspci` output — checks VGA, 3D controller, display controller lines. NVIDIA and AMD checked before Intel to correctly identify discrete GPUs on systems with Intel integrated graphics.
-- Windows: WMIC query (planned)
+- Windows: `wmic path win32_VideoController get name` — checks for NVIDIA and AMD before Intel; Intel check requires "arc", "iris", or "uhd" in the adapter name to avoid false matches on Intel chipsets without SYCL-capable GPUs. Result is cached via function attribute to avoid repeated slow wmic calls. **Note:** wmic is deprecated from Windows 10 21H1+ and may be removed in a future Windows release. If detection stops working, replace with a PowerShell `Get-WmiObject Win32_VideoController` query.
 - macOS: `system_profiler` (planned)
 
 ---
@@ -567,6 +576,35 @@ One AURINI-managed Python runtime shared across all plugins. Venvs provide packa
 ### Hyphenated plugin folder names and importlib
 Plugin folders use hyphenated names (`llama-cpp`) for readability and consistency with plugin IDs. Python cannot import hyphenated names with a standard `import` statement. The core must load plugins via `importlib.util.spec_from_file_location()`. This is the correct pattern anyway since plugins are discovered dynamically at runtime — hyphenation just makes it explicit that plugins are not regular Python packages. Test harnesses must also use this pattern (register module stubs with `sys.modules` before loading).
 
+### Windows oneAPI environment activation
+On Linux, `source setvars.sh` modifies the current shell environment. On Windows, `setvars.bat` only modifies the cmd.exe child process it runs in. AURINI captures the post-activation environment by writing a temporary batch file that calls `setvars.bat intel64 --force` and then runs `set` to print all env vars, then parses that output into a dict and injects it into subsequent subprocesses explicitly. Using a temp .bat file (rather than a multi-line cmd /c string) is more reliable — env changes from setvars.bat are guaranteed to be visible to the subsequent set command. The env capture is done in `_capture_setvars_env()` in `sycl_windows.py` and is reused for both sycl-ls checks and the build. The setvars.bat banner lines (starting with `::` or `:`) must be filtered out of the `set` output before parsing — they mix into stdout and can corrupt env var parsing if not skipped.
+
+### winget availability is not assumed on Windows
+winget ships with Windows 10 1709+ via App Installer, but may be absent on some machines (older installs, LTSC editions, stripped enterprise images). AURINI checks for winget first and caches the result. Remedies that would use winget degrade gracefully to manual instructions with download URLs if it is not available. This is the correct "check everything, guide if we can't automate" pattern for Windows.
+
+### VS detection via vswhere, not PATH
+Visual Studio is not on PATH by default — it must be located via `vswhere.exe` (ships with VS 2017+, lives at a fixed path in Program Files). AURINI uses vswhere with a version range filter `[17,)` (VS2022 is 17.x, VS2026 is 18.x — open-ended to handle future versions) and requires the `Microsoft.VisualCpp.Tools.HostX64.TargetX64` component to confirm the C++ workload is installed, not just the IDE shell. Falls back to scanning known install paths if vswhere itself is absent.
+
+### Visual Studio install directory naming
+VS2022 installs to `\Microsoft Visual Studio\2022\`. VS2026 installs to `\Microsoft Visual Studio\18\` (using its internal version number, not the year). The `_find_cmake_windows()` and `_detect_vs2022()` helpers must check both patterns. Future VS versions may follow either convention — when adding support, check the actual install path first.
+
+### cmake on Windows is not on PATH by default
+cmake installed via the Visual Studio Installer ends up in a VS-internal path that is not added to the system PATH. `shutil.which("cmake")` will not find it. The `_find_cmake_windows()` helper in `sycl_windows.py` searches known VS-internal cmake locations before falling back to the winget remedy. The cmake directory found this way must also be injected into the subprocess PATH when running cmake during the build.
+
+### Windows binary path differs from Linux
+Linux: `build/bin/llama-server`
+Windows: `build\bin\llama-server.exe`
+The backend's `binary_path()` method handles this — the core never hardcodes the binary location.
+
+### SYCL_CACHE_PERSISTENT on Windows
+Set in `build_launch_env()` for the Windows backend. Compiled SYCL kernels are cached between runs, giving a significant speedup on second and subsequent launches. Safe to always enable — stale cache issues are rare and can be cleared by deleting the cache dir if they occur.
+
+### OpenCL/Vulkan Compatibility Pack gotcha
+Installing Intel Arc drivers on Windows sometimes silently installs the Microsoft OpenCL/Vulkan Compatibility Pack from the Microsoft Store. This package can block sycl-ls from finding level_zero GPU devices. It appears in the Microsoft Store and can be uninstalled from there. Surfaced in the `remedy_gpu_not_visible` instructions so users have a clear path forward.
+
+### cmd emoji rendering on Windows
+Unicode emoji (✓, ✗, etc.) do not render correctly in Windows cmd.exe — they display as `[?]`. run_aurini.py needs an ASCII fallback for Windows: `[OK]` / `[FAIL]` / `[??]` etc. Detect via `sys.platform == "win32"` and choose symbol set accordingly.
+
 ---
 
 ## Critical Working Rules
@@ -604,17 +642,22 @@ Plugin folders use hyphenated names (`llama-cpp`) for readability and consistenc
 - [x] `aurini/core/profile.py` — profile CRUD, launch settings, custom args, default management
 - [x] `aurini/core/__init__.py` — clean public exports for all core modules
 
-### Done - session 3
-- [x] `run_aurini.py` — end-to-end install script; first real hardware test on Arc A750, confirmed working
-- [x] `aurini/core/checks.py` — fixed disk_space_gte to walk up to nearest existing ancestor when install path doesn't exist yet
-- [x] `aurini/core/runner.py` — fixed ghost remedy jobs: only create remedy `JobLog` when remedies are actually applied; call `mark_complete()`/`mark_failed()` at end of `run_remedies()`
+### Done — session 3
+- [x] `run_aurini.py` — end-to-end install script; first real hardware test on Arc A750, confirmed working on Linux
+- [x] `aurini/core/checks.py` — fixed disk_space_gte to walk up to nearest existing ancestor when install path doesn't exist yet; wrapped `import grp` in try/except for Windows compatibility; added guard to `user_in_group` for Windows
+- [x] `aurini/core/runner.py` — fixed ghost remedy jobs: only create remedy JobLog when remedies are actually applied; call `mark_complete()`/`mark_failed()` at end of `run_remedies()`
+- [x] `plugins/llama-cpp/backends/sycl_windows.py` — Intel Arc, Windows 10/11; full check + remedy suite including winget detection, VS2022/2026 detection via vswhere, oneAPI env capture, Arc driver version check, cmake/ninja/git install
+- [x] `plugins/llama-cpp/plugin.py` — Windows backend wired into dispatcher; added `_detect_gpu_vendor_windows()` with caching and wmic deprecation note
 
 ### Next session — start here
-- [ ] Launch script — run_launch.py equivalent of run_aurini.py for starting llama-server from a profile; needs build_launch_command() + build_launch_env() wired together with the setvars sourcing pattern from SENNI
-- [ ] Root-owned build folder detection (carry forward from before) — detect if install path is owned by root and surface the chown fix before attempting build (noted in CLAUDE.md key decisions)
+- [ ] **Fix `_capture_setvars_env()` in `sycl_windows.py`** — env capture runs and returns 103 keys but PATH is missing, causing sycl-ls to fail. The setvars.bat banner lines starting with `:` are being filtered correctly but something in the parsing is still dropping PATH. Next session should pull the actual file, print the raw parsed env dict in a debug run, and fix the parser. sycl-ls works correctly when called manually after setvars.bat so the oneAPI install itself is fine.
+- [ ] **Fix multiple instances being created each run** — `get_or_create_instance()` in `run_aurini.py` is not finding the existing instance and creates a new one every run (llama-cpp-arc, llama-cpp-arc-2, llama-cpp-arc-3...). Needs investigation of the instance lookup logic.
+- [ ] **Add cmake to subprocess PATH on Windows** — cmake is found via `_find_cmake_windows()` but its directory is not being injected into the environment passed to cmake/ninja subprocesses. Build will fail until this is fixed.
+- [ ] **Fix ninja not found** — ninja is not on PATH and not found in VS-internal locations. Either extend `_find_cmake_windows()`-style search to ninja, or let winget install it and ensure the post-install PATH is refreshed before the check re-runs.
+- [ ] **ASCII fallback for emoji in cmd.exe** — ✓/✗ render as [?] in Windows cmd. Detect `sys.platform == "win32"` in `run_aurini.py` and use `[OK]`/`[FAIL]` instead.
+- [ ] **Launch script** — `run_launch.py` equivalent of `run_aurini.py` for starting llama-server from a profile; needs `build_launch_command()` + `build_launch_env()` wired together with the setvars sourcing pattern from SENNI
 
 ### Remaining work
-- [ ] `backends/sycl_windows.py` — Intel Arc, Windows (`setvars.bat`, `CREATE_NO_WINDOW` — pattern exists in SENNI's `server.py`)
 - [ ] `backends/cuda_linux.py` — NVIDIA, Linux
 - [ ] `backends/cuda_windows.py` — NVIDIA, Windows
 - [ ] `backends/rocm_linux.py` — AMD, Linux
@@ -629,10 +672,11 @@ Plugin folders use hyphenated names (`llama-cpp`) for readability and consistenc
 - [ ] Model file management (download, organise, delete)
 - [ ] Python runtime update UI (Settings → Components)
 - [ ] Retire `update_llama.py` once first end-to-end test confirms core runner works
-- [ ] Data directory mode setting — AURINI currently hardcodes its data directory (~/aurini/ on Linux/Mac, %APPDATA%/aurini/ on Windows). Three modes should be supported: os_default (current behaviour), portable (a aurini-data/ folder next to the executable — useful for keeping everything in one place), and custom (user-specified path). The mode preference is stored in a small fixed-location config file (~/.config/aurini/aurini.conf on Linux/Mac) that never moves regardless of which mode is chosen — this solves the bootstrapping problem of "where do I store the setting that tells me where to store things." Only aurini_data_dir() in paths.py needs to change; everything downstream (aurini_logs_dir(), aurini_instances_dir(), etc.) follows automatically. As a dev convenience in the meantime, aurini_data_dir() can check for an AURINI_DATA_DIR env var and use that if set — three-line change, fully reversible. Best implemented when the GUI settings screen exists, since the user needs a UI to choose the mode. The env var override is the right stopgap until then.
+- [ ] Data directory mode setting — AURINI currently hardcodes its data directory (`~/aurini/` on Linux/Mac, `%APPDATA%/aurini/` on Windows). Three modes should be supported: `os_default` (current behaviour), `portable` (a `aurini-data/` folder next to the executable), and `custom` (user-specified path). The mode preference is stored in a small fixed-location config file (`~/.config/aurini/aurini.conf` on Linux/Mac) that never moves regardless of which mode is chosen. Only `aurini_data_dir()` in `paths.py` needs to change; everything downstream follows automatically. As a dev convenience, `aurini_data_dir()` can check for an `AURINI_DATA_DIR` env var and use that if set. Best implemented when the GUI settings screen exists.
 
+---
 
-### `update_llama.py`
+## `update_llama.py`
 The original prototype of AURINI's llama.cpp plugin. Now superseded by the plugin architecture but kept for reference. The logic has been ported into `backends/sycl_linux.py` and `backends/shared.py`.
 
 **Exact cmake flags used (Intel Arc, Linux):**

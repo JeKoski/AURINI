@@ -39,7 +39,10 @@ Usage in a plugin's run_check():
 
 from __future__ import annotations
 
-import grp
+try:
+    import grp
+except ImportError:
+    grp = None  # Windows — grp module is Unix-only
 import importlib.util
 import os
 import platform
@@ -251,7 +254,14 @@ def user_in_group(
 ) -> CheckResult:
     """
     Check that the current user is a member of a system group.
+    Unix/Linux only — not applicable on Windows.
     """
+    if grp is None:
+        return _fail(
+            check_id,
+            "Group membership checks are not supported on Windows.",
+            raw_output="",
+        )
     try:
         username = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
         group_members = grp.getgrnam(group).gr_mem
