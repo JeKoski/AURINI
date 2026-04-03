@@ -609,7 +609,7 @@ Unicode emoji (✓, ✗, etc.) do not render correctly in Windows cmd.exe — th
 
 ## Critical Working Rules
 
-- **Always provide complete files** — never code sections, never snippets, never "find X and replace with Y". The user has ADHD and finds partial edits extremely difficult. Full file replacements only. This is also why we keep architecture as modular as possible.
+- **Always provide complete files** — never code sections, never snippets, never "find X and replace with Y". The user has ADHD and finds partial edits extremely difficult. Full file replacements only. Only Claude working on the code also ensures he knows the actual current state. This is also why we keep architecture as modular as possible.
 - **One file at a time** where possible. Flag upfront if a feature will require touching multiple files and get agreement before proceeding.
 - **Stop and check in** if things start going wrong rather than pushing through. Escalating complexity when stuck makes things worse.
 - **Never ask the user to remember to do things** at specific times — ADHD means this won't work. Automate it or build it into existing flows instead.
