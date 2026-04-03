@@ -609,7 +609,7 @@ Unicode emoji (✓, ✗, etc.) do not render correctly in Windows cmd.exe — th
 
 ## Critical Working Rules
 
-- **Always provide complete files** — never code sections, never snippets, never "find X and replace with Y". The user has ADHD and finds partial edits extremely difficult. Full file replacements only.
+- **Always provide complete files** — never code sections, never snippets, never "find X and replace with Y". The user has ADHD and finds partial edits extremely difficult. Full file replacements only. This is also why we keep architecture as modular as possible.
 - **One file at a time** where possible. Flag upfront if a feature will require touching multiple files and get agreement before proceeding.
 - **Stop and check in** if things start going wrong rather than pushing through. Escalating complexity when stuck makes things worse.
 - **Never ask the user to remember to do things** at specific times — ADHD means this won't work. Automate it or build it into existing flows instead.
@@ -650,7 +650,7 @@ Unicode emoji (✓, ✗, etc.) do not render correctly in Windows cmd.exe — th
 - [x] `plugins/llama-cpp/plugin.py` — Windows backend wired into dispatcher; added `_detect_gpu_vendor_windows()` with caching and wmic deprecation note
 
 ### Next session — start here
-- [ ] **Fix `_capture_setvars_env()` in `sycl_windows.py`** — env capture runs and returns 103 keys but PATH is missing, causing sycl-ls to fail. The setvars.bat banner lines starting with `:` are being filtered correctly but something in the parsing is still dropping PATH. Next session should pull the actual file, print the raw parsed env dict in a debug run, and fix the parser. sycl-ls works correctly when called manually after setvars.bat so the oneAPI install itself is fine.
+- [ ] **Fix `_capture_setvars_env()` in `sycl_windows.py`** — env capture runs and returns 103 keys but PATH is missing, causing sycl-ls to fail. The setvars.bat banner lines starting with `:` are being filtered correctly but something in the parsing is still dropping PATH. Next session should pull the actual file, print the raw parsed env dict in a debug run, and fix the parser. sycl-ls works correctly when called manually after setvars.bat so the oneAPI install itself is fine. Look into SENNI projects server.py line: 437-452, this is working for the oneAPI server boot.
 - [ ] **Fix multiple instances being created each run** — `get_or_create_instance()` in `run_aurini.py` is not finding the existing instance and creates a new one every run (llama-cpp-arc, llama-cpp-arc-2, llama-cpp-arc-3...). Needs investigation of the instance lookup logic.
 - [ ] **Add cmake to subprocess PATH on Windows** — cmake is found via `_find_cmake_windows()` but its directory is not being injected into the environment passed to cmake/ninja subprocesses. Build will fail until this is fixed.
 - [ ] **Fix ninja not found** — ninja is not on PATH and not found in VS-internal locations. Either extend `_find_cmake_windows()`-style search to ninja, or let winget install it and ensure the post-install PATH is refreshed before the check re-runs.
