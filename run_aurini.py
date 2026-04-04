@@ -60,7 +60,7 @@ from aurini.core.instance import Instance, PathMode
 from aurini.core.profile  import Profile
 from aurini.core.runner   import Runner, RunnerPhase
 from aurini.core.log      import JobAction
-from aurini.core.paths    import aurini_instances_dir, aurini_logs_dir
+from aurini.core.paths    import aurini_instances_dir, aurini_logs_dir, current_os
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -165,7 +165,7 @@ def get_or_create_instance() -> Instance:
             "fp16": {"enabled": True, "value": FP16},
         },
         path_mode=PathMode.CUSTOM,
-        custom_paths={"linux": str(INSTALL_PATH)},
+        custom_paths={current_os().value: str(INSTALL_PATH)},
         instances_dir=instances_dir,
     )
     print(f"  Created new instance: {inst.instance_id}")

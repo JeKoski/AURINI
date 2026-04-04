@@ -245,6 +245,83 @@ def run_build(
     return success, note
 
 
+def run_build_windows(
+    repo:        Path,
+    cmake_flags: list[str],
+    cores:       int,
+    setvars_bat: Path,
+    extra_paths: list[Path] | None = None,
+) -> tuple[bool, str]:
+    """
+    Run cmake configure + build on Windows inside the setvars.bat environment.
+
+    Writes a temporary batch file that calls setvars.bat (which internally
+    calls vcvarsall to set up cl.exe and the Windows SDK) and then runs cmake.
+    Using a batch file rather than cmd.exe && chaining is critical: batch file
+    `call` semantics propagate environment changes (including those made by
+    setvars.bat's internal vcvars call) to subsequent commands in the same
+    process. The && operator does NOT do this — each step runs in a fresh
+    child environment, so cl.exe and kernel32.lib end up missing from cmake.
+
+    setvars_bat:  full path to Intel oneAPI setvars.bat.
+    extra_paths:  additional directories to prepend to PATH before cmake runs
+                  (e.g. VS-internal cmake/bin and ninja dirs not on system PATH).
+
+    Build output streams live to the terminal. Returns (success, note).
+    """
+    import tempfile
+
+    build_dir = repo / "build"
+    build_dir.mkdir(exist_ok=True)
+
+    flags_str = " ".join(cmake_flags)
+
+    # Prepend extra tool dirs (cmake, ninja) to PATH if needed.
+    path_line = ""
+    if extra_paths:
+        joined = ";".join(str(p) for p in extra_paths if p)
+        path_line = f'set "PATH={joined};%PATH%"\r\n'
+
+    # Write a temp batch file. `call` propagates env changes from setvars.bat
+    # (including its internal vcvars call) to the cmake steps that follow.
+    bat_content = (
+        f'@echo off\r\n'
+        f'call "{setvars_bat}" intel64 --force\r\n'
+        f'{path_line}'
+        f'cmake -B build {flags_str}\r\n'
+        f'if errorlevel 1 exit /b 1\r\n'
+        f'cmake --build build --config Release -j{cores}\r\n'
+        f'if errorlevel 1 exit /b 1\r\n'
+    )
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".bat",
+            delete=False,
+            encoding="utf-8",
+        ) as f:
+            f.write(bat_content)
+            bat_path = f.name
+
+        result = subprocess.run(
+            ["cmd.exe", "/c", bat_path],
+            cwd=str(repo),
+        )
+        code = result.returncode
+    except Exception:
+        return False, traceback.format_exc()
+    finally:
+        try:
+            Path(bat_path).unlink()
+        except Exception:
+            pass
+
+    success = code == 0
+    note = f"(build output displayed live — exit code: {code})"
+    return success, note
+
+
 def verify_binary(install_path: Path, binary_relative: str) -> bool:
     """
     Return True if the expected binary exists after a build.

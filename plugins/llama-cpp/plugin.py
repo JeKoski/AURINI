@@ -446,12 +446,44 @@ class Plugin(AuriniPlugin):
         env_setup:    str | None,
         config:       dict[str, Any],
     ) -> None:
-        success, note = shared.run_build(
-            repo=install_path,
-            cmake_flags=flags,
-            cores=cores,
-            env_setup=env_setup,
-        )
+        import sys as _sys
+        if _sys.platform == "win32":
+            # Windows: use cmd.exe shell chaining with setvars.bat.
+            # bash is not available; env_setup_script() returns None for
+            # Windows backends — the env is activated inline via setvars.bat.
+            # We also inject cmake/ninja directories that VS installs to
+            # off-PATH locations so they're found during the build.
+            from plugins.llama_cpp.backends.sycl_windows import (
+                ONEAPI_SETVARS,
+                SyclWindowsBackend,
+            )
+            extra_paths: list[Path] = []
+            if isinstance(self._backend, SyclWindowsBackend):
+                cmake_path = self._backend._find_cmake_windows()
+                ninja_path = self._backend._find_ninja_windows()
+                sdk_rc, _  = self._backend._find_windows_sdk()
+                if cmake_path:
+                    extra_paths.append(cmake_path.parent)
+                if ninja_path:
+                    extra_paths.append(ninja_path.parent)
+                if sdk_rc:
+                    extra_paths.append(sdk_rc.parent)  # SDK bin/x64 — adds rc.exe, mt.exe
+
+            success, note = shared.run_build_windows(
+                repo=install_path,
+                cmake_flags=flags,
+                cores=cores,
+                setvars_bat=ONEAPI_SETVARS,
+                extra_paths=extra_paths or None,
+            )
+        else:
+            success, note = shared.run_build(
+                repo=install_path,
+                cmake_flags=flags,
+                cores=cores,
+                env_setup=env_setup,
+            )
+
         if not success:
             raise RuntimeError(
                 "Build failed. Check the output above for the specific error.\n"

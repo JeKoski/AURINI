@@ -97,10 +97,10 @@ def _capture_setvars_env() -> dict[str, str] | None:
     """
     Run setvars.bat and capture the resulting environment variables.
 
-    Writes a temporary batch file that calls setvars.bat then prints
-    the environment via `set`. This is more reliable than passing a
-    multi-line script to cmd /c directly, as env changes from setvars.bat
-    are guaranteed to be visible to the subsequent set command.
+    Writes a temporary batch file that calls setvars.bat, prints a sentinel
+    line, then dumps the environment via `set`. Only lines after the sentinel
+    are parsed — this sidesteps setvars.bat's banner output (which goes to
+    stdout, not stderr) without relying on fragile prefix-based filtering.
 
     Returns the environment dict on success, or None on failure.
     """
@@ -109,10 +109,18 @@ def _capture_setvars_env() -> dict[str, str] | None:
 
     import tempfile
 
-    # Write a temp .bat file — more reliable than a multi-line cmd /c string
+    # Sentinel line that marks the boundary between setvars.bat banner output
+    # and the actual `set` dump. setvars.bat prints a lot of status text to
+    # stdout (not stderr) — @echo off suppresses the `call` line itself but
+    # not setvars.bat's own output. We cannot reliably filter those banner
+    # lines by prefix, so instead we print a known sentinel AFTER setvars.bat
+    # finishes and only parse what follows it.
+    SENTINEL = "AURINI_ENV_BEGIN"
+
     bat_content = (
         f'@echo off\r\n'
         f'call "{ONEAPI_SETVARS}" intel64 --force\r\n'
+        f'echo {SENTINEL}\r\n'
         f'set\r\n'
     )
 
@@ -144,21 +152,29 @@ def _capture_setvars_env() -> dict[str, str] | None:
         if result.returncode != 0:
             return None
 
+        # Only parse lines that appear after the sentinel — everything before
+        # it is setvars.bat banner output and must be ignored.
+        lines = result.stdout.splitlines()
+        try:
+            sentinel_idx = next(
+                i for i, l in enumerate(lines) if l.strip() == SENTINEL
+            )
+        except StopIteration:
+            # Sentinel not found — setvars.bat may have failed silently.
+            return None
+
         env: dict[str, str] = {}
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            # Skip empty lines and setvars banner lines (start with :: or :)
-            if not line or line.startswith(":"):
-                continue
+        for line in lines[sentinel_idx + 1:]:
+            # `set` output lines are exactly "KEY=value" — no stripping of
+            # the value, as env var values are exact (stripping could corrupt
+            # PATH entries that start/end with a space, rare but possible).
             if "=" not in line:
                 continue
             key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip()
-            # Skip empty or obviously invalid keys
+            # Keys must not contain spaces — skip malformed lines.
             if not key or " " in key:
                 continue
-            env[key] = value
+            env[key.upper()] = value
 
         return env if env else None
 
@@ -173,24 +189,33 @@ def _run_in_setvars_env(
     """
     Run a command inside the setvars.bat environment.
 
+    Uses the same shell-chaining approach as SENNI's server.py — chain
+    setvars.bat && command in a single cmd.exe /c call with shell=True.
+    This is simpler and more reliable than capturing the env via `set`
+    and injecting it manually, because cmd.exe handles the activation
+    natively without any parsing needed.
+
     Used for checks that require the oneAPI environment to be active
     (e.g. sycl-ls). Returns (returncode, combined stdout+stderr).
-    Returns (-1, error_message) if setvars.bat is missing or env capture fails.
+    Returns (-1, error_message) if setvars.bat is missing.
     """
-    env = _capture_setvars_env()
-    if env is None:
+    if not ONEAPI_SETVARS.exists():
         return -1, (
             "Could not activate Intel oneAPI environment. "
             "Check that oneAPI is installed at the expected path."
         )
 
+    # Quote each argument and join — handles paths with spaces correctly.
+    cmd_str  = " ".join(f'"{a}"' for a in command)
+    full_cmd = f'"{ONEAPI_SETVARS}" intel64 --force && {cmd_str}'
+
     try:
         result = subprocess.run(
-            command,
+            full_cmd,
+            shell=True,
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=env,
             encoding="utf-8",
             errors="replace",
         )
@@ -290,20 +315,24 @@ class SyclWindowsBackend(LlamaCppBackend):
                                  Checked first so later remedy descriptions are
                                  accurate (winget vs manual).
         2. vs2022_present      — required before cmake can find cl.exe. Manual only.
-        3. oneapi_present      — toolkit must exist before gpu_visible can work.
-        4. arc_driver_present  — driver version must be sufficient before sycl-ls works.
-        5. git_present         — needed for clone/update.
-        6. cmake_present       — needed for configure step.
-        7. ninja_present       — required by the Ninja cmake generator.
-        8. disk_space          — catch insufficient space before anything touches disk.
-        9. internet_reachable  — needed for clone/update.
-        10. github_reachable   — specifically needed for git operations.
-        11. gpu_visible        — sycl-ls check; needs oneAPI env and correct driver.
-        12. build_dir_writable — last, path may not be set yet at check time.
+        3. windows_sdk_present — Windows SDK required for rc.exe and kernel32.lib.
+                                 Checked immediately after VS — SDK is installed via
+                                 the VS Installer and missing SDK is a common gotcha.
+        4. oneapi_present      — toolkit must exist before gpu_visible can work.
+        5. arc_driver_present  — driver version must be sufficient before sycl-ls works.
+        6. git_present         — needed for clone/update.
+        7. cmake_present       — needed for configure step.
+        8. ninja_present       — required by the Ninja cmake generator.
+        9. disk_space          — catch insufficient space before anything touches disk.
+        10. internet_reachable — needed for clone/update.
+        11. github_reachable   — specifically needed for git operations.
+        12. gpu_visible        — sycl-ls check; needs oneAPI env and correct driver.
+        13. build_dir_writable — last, path may not be set yet at check time.
         """
         return [
             "winget_present",
             "vs2022_present",
+            "windows_sdk_present",
             "oneapi_present",
             "arc_driver_present",
             "git_present",
@@ -386,6 +415,38 @@ class SyclWindowsBackend(LlamaCppBackend):
                 ),
                 raw_output=raw,
                 remedy_id="remedy_install_vs2022",
+                risk="manual",
+            )
+
+        # ── Windows SDK ───────────────────────────────────────────────────────
+
+        if check_id == "windows_sdk_present":
+            # The Windows SDK provides rc.exe (resource compiler), mt.exe
+            # (manifest tool), and the kernel32.lib / ucrt lib paths that
+            # cl.exe needs to link even a trivial program. Without it, cmake
+            # compiler detection fails with LNK1104 or "rc: no such file".
+            # The SDK is installed via the VS Installer — it is NOT included
+            # in the base C++ workload. Users must tick it explicitly.
+            sdk_path, sdk_raw = self._find_windows_sdk()
+            if sdk_path:
+                return CheckResult(
+                    check_id=check_id,
+                    passed=True,
+                    message=f"Windows SDK found at: {sdk_path}",
+                    raw_output=sdk_raw,
+                )
+            return CheckResult(
+                check_id=check_id,
+                passed=False,
+                message=(
+                    "Windows SDK was not found. "
+                    "It is required for the C compiler to work — "
+                    "without it, rc.exe and kernel32.lib are missing and "
+                    "the build will fail at the cmake configuration step. "
+                    "Install it via the Visual Studio Installer."
+                ),
+                raw_output=sdk_raw,
+                remedy_id="remedy_install_windows_sdk",
                 risk="manual",
             )
 
@@ -486,6 +547,17 @@ class SyclWindowsBackend(LlamaCppBackend):
         # ── ninja ─────────────────────────────────────────────────────────────
 
         if check_id == "ninja_present":
+            # ninja installed via VS Installer lives in a VS-internal path
+            # not on system PATH — same problem as cmake. Search known locations
+            # before falling back to the winget remedy.
+            ninja_path = self._find_ninja_windows()
+            if ninja_path:
+                return CheckResult(
+                    check_id=check_id,
+                    passed=True,
+                    message=f"Found ninja at: {ninja_path}",
+                    raw_output="",
+                )
             return command_exists(
                 check_id=check_id,
                 command="ninja",
@@ -681,6 +753,42 @@ class SyclWindowsBackend(LlamaCppBackend):
                     "",
                     "Note: Visual Studio Code is NOT the same as Visual Studio —",
                     "you need the full Visual Studio 2022 IDE.",
+                ],
+            )
+            self._log_remedy(result, RevertType.MANUAL,
+                             revert_note=result.undo_instructions)
+            return result
+
+        # ── Windows SDK ───────────────────────────────────────────────────────
+
+        if remedy_id == "remedy_install_windows_sdk":
+            result = RemedyResult(
+                remedy_id=remedy_id,
+                success=True,
+                message="Windows SDK installation instructions shown to user.",
+                undo_instructions=(
+                    "The Windows SDK can be removed via the Visual Studio Installer: "
+                    "Modify → Individual Components → uncheck the SDK version."
+                ),
+                raw_output="",
+                instructions=[
+                    "The Windows SDK is required for building C/C++ programs on Windows.",
+                    "Without it, rc.exe and kernel32.lib are missing and the build fails.",
+                    "",
+                    "To install it:",
+                    "  1. Open the Visual Studio Installer",
+                    "     (search 'Visual Studio Installer' in the Start menu)",
+                    "",
+                    "  2. Click 'Modify' next to your Visual Studio installation",
+                    "",
+                    "  3. Go to the 'Individual Components' tab",
+                    "",
+                    "  4. Search for 'Windows 11 SDK' and tick the latest version",
+                    "     (e.g. Windows 11 SDK (10.0.26100.xxxx))",
+                    "",
+                    "  5. Click 'Modify' to install — this is a small download (~500MB)",
+                    "",
+                    "  6. Restart this wizard after installation completes",
                 ],
             )
             self._log_remedy(result, RevertType.MANUAL,
@@ -1071,6 +1179,85 @@ class SyclWindowsBackend(LlamaCppBackend):
         )
         return result
 
+    def _find_windows_sdk(self) -> tuple[Path | None, str]:
+        """
+        Find the Windows SDK installation, specifically rc.exe.
+
+        The SDK is installed via the VS Installer under Individual Components.
+        rc.exe lives in the SDK bin directory under the version number.
+        Returns (rc_exe_path | None, raw_output_string).
+        """
+        # Standard Windows SDK install location
+        sdk_root = Path(r"C:\Program Files (x86)\Windows Kits\10\bin")
+        if sdk_root.exists():
+            # Look for the highest-versioned SDK that has rc.exe for x64
+            candidates = sorted(
+                [d for d in sdk_root.iterdir() if d.is_dir() and d.name.startswith("10.")],
+                reverse=True,
+            )
+            for sdk_dir in candidates:
+                rc = sdk_dir / "x64" / "rc.exe"
+                if rc.exists():
+                    return rc, f"Found rc.exe at: {rc}"
+            return None, f"Windows Kits found at {sdk_root} but no rc.exe inside."
+
+        return None, "Windows Kits not found at C:\\Program Files (x86)\\Windows Kits\\10\\"
+
+    def _find_vcvarsall(self) -> Path | None:
+        """
+        Find vcvarsall.bat for the installed Visual Studio.
+
+        vcvarsall.bat sets up cl.exe, the Windows SDK library paths, and the
+        linker — it must be called before setvars.bat in the build chain.
+        Uses vswhere to find the VS installation path reliably, then constructs
+        the known relative path to vcvarsall.bat within it.
+
+        Returns the path if found, None if VS is not installed or vswhere fails.
+        """
+        vswhere = Path(
+            r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+        )
+        if vswhere.exists():
+            try:
+                result = subprocess.run(
+                    [
+                        str(vswhere),
+                        "-version", "[17,)",
+                        "-requires", "Microsoft.VisualCpp.Tools.HostX64.TargetX64",
+                        "-property", "installationPath",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    vs_root = Path(result.stdout.strip().splitlines()[0])
+                    vcvarsall = vs_root / r"VC\Auxiliary\Build\vcvarsall.bat"
+                    if vcvarsall.exists():
+                        return vcvarsall
+            except Exception:
+                pass
+
+        # Fallback: check known VS install paths
+        for vs_root in [
+            Path(r"C:\Program Files\Microsoft Visual Studio\2022\Community"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\2022\Professional"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\2026\Community"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\2026\Professional"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\2026\Enterprise"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\18\Community"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\18\Professional"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\18\Enterprise"),
+        ]:
+            vcvarsall = vs_root / r"VC\Auxiliary\Build\vcvarsall.bat"
+            if vcvarsall.exists():
+                return vcvarsall
+
+        return None
+
     def _find_cmake_windows(self) -> Path | None:
         """
         Find cmake.exe on Windows, including VS-internal install locations
@@ -1112,6 +1299,49 @@ class SyclWindowsBackend(LlamaCppBackend):
 
         return None
 
+    def _find_ninja_windows(self) -> Path | None:
+        """
+        Find ninja.exe on Windows, including the VS-internal location where
+        the VS Installer puts it (alongside cmake, not on system PATH).
+
+        Search order:
+        1. System PATH (shutil.which)
+        2. Visual Studio internal ninja (installed via VS Installer)
+        3. winget default install location
+        """
+        import shutil as _shutil
+
+        # 1. System PATH
+        found = _shutil.which("ninja")
+        if found:
+            return Path(found)
+
+        # 2. Visual Studio internal ninja — VS ships ninja in the same
+        #    CommonExtensions tree as cmake, one level up from CMake/bin.
+        vs_roots = [
+            Path(r"C:\Program Files\Microsoft Visual Studio\2022\Community"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\2022\Professional"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\2026\Community"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\2026\Professional"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\2026\Enterprise"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\18\Community"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\18\Professional"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\18\Enterprise"),
+        ]
+        for root in vs_roots:
+            ninja = root / r"Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
+            if ninja.exists():
+                return ninja
+
+        # 3. winget installs ninja to a versioned path under ProgramFiles
+        winget_base = Path(r"C:\Program Files\Ninja Build\ninja")
+        if winget_base.exists():
+            for ninja in winget_base.rglob("ninja.exe"):
+                return ninja
+
+        return None
+
     def _log_remedy(
         self,
         result:         RemedyResult,
@@ -1122,9 +1352,10 @@ class SyclWindowsBackend(LlamaCppBackend):
         """Log a remedy result to the job log if one is set."""
         if self._job_log is None:
             return
-        self._job_log.record_remedy(
-            result=result,
+        self._job_log.add_entry(
+            description=result.message,
             revert_type=revert_type,
             revert_command=revert_command,
             revert_note=revert_note,
+            raw_output=result.raw_output,
         )
