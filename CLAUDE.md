@@ -669,9 +669,9 @@ Unicode emoji (✓, ✗, etc.) do not render correctly in Windows cmd.exe — th
 - [x] **Windows build confirmed reaching compilation** — all checks pass, clone succeeds, cmake configures, build running on Arc A750 / Windows 10.
 
 ### Next session — start here
-- [ ] **Confirm build completes successfully** — build was running at end of session 4 but not yet finished. Verify binary exists at `build\bin\llama-server.exe`.
-- [ ] **ASCII fallback for emoji in cmd.exe** — ✓/✗ render as [?] in Windows cmd. Detect `sys.platform == "win32"` in `run_aurini.py` and use `[OK]`/`[FAIL]` instead.
-- [ ] **Launch script** — `run_launch.py` equivalent of `run_aurini.py` for starting llama-server from a profile; needs `build_launch_command()` + `build_launch_env()` wired together with the setvars sourcing pattern from SENNI.
+- [ ] **ASCII fallback for emoji in cmd.exe** — ✓/✗ render as [?] in Windows cmd. Detect `sys.platform == "win32"` in `run_aurini.py` and `run_launch.py`, use `[OK]`/`[FAIL]` instead. Quick fix.
+- [ ] **Update flow test** — `plugin.update()` exists but hasn't been tested. Write a quick `run_update.py` or add an update mode to `run_aurini.py`. Important for real-world use.
+- [ ] **GUI layer (Tauri)** — backend is ready. This is the next big thing.
 
 ### Remaining work
 - [ ] `backends/cuda_linux.py` — NVIDIA, Linux
