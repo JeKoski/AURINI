@@ -1,0 +1,129 @@
+{
+  "id": "kokoro",
+  "name": "Kokoro TTS",
+  "version": "1.0.0",
+  "description": "Local text-to-speech engine for SENNI. Installs kokoro and soundfile via pip, and espeak-ng via the system package manager.",
+  "author": "AURINI project",
+  "platforms": ["linux", "windows"],
+
+  "dependencies": [],
+
+  "checks": [
+    {
+      "id": "python_usable",
+      "type": "command_exists",
+      "description": "Python 3 is available at the configured path",
+      "command": "python3",
+      "on_fail": null,
+      "note": "Checked against python_path from SENNI config (or sys.executable if unset)."
+    },
+    {
+      "id": "kokoro_importable",
+      "type": "python_module_importable",
+      "description": "kokoro Python package is installed",
+      "module": "kokoro",
+      "on_fail": "remedy_pip_kokoro"
+    },
+    {
+      "id": "soundfile_importable",
+      "type": "python_module_importable",
+      "description": "soundfile Python package is installed",
+      "module": "soundfile",
+      "on_fail": "remedy_pip_soundfile"
+    },
+    {
+      "id": "espeak_present",
+      "type": "command_exists",
+      "description": "espeak-ng is installed and on PATH (required by kokoro for phoneme generation)",
+      "command": "espeak-ng",
+      "on_fail": "remedy_install_espeak"
+    },
+    {
+      "id": "voices_dir_exists",
+      "type": "directory_exists",
+      "description": "Kokoro voices directory exists and contains at least one .pt voice file",
+      "path": null,
+      "note": "Path is the voices_path from SENNI config, or auto-discovered next to tts.py if unset. Checked at pre-flight time.",
+      "on_fail": "remedy_voices_dir_missing"
+    }
+  ],
+
+  "remedies": [
+    {
+      "id": "remedy_pip_kokoro",
+      "risk": "high",
+      "auto_fixable": true,
+      "description": "Install the kokoro package via pip into the configured Python environment.",
+      "undo_instructions": "Run: pip uninstall kokoro -y\n(or use the same python_path: <python_path> -m pip uninstall kokoro -y)"
+    },
+    {
+      "id": "remedy_pip_soundfile",
+      "risk": "high",
+      "auto_fixable": true,
+      "description": "Install the soundfile package via pip into the configured Python environment.",
+      "undo_instructions": "Run: pip uninstall soundfile -y\n(or use the same python_path: <python_path> -m pip uninstall soundfile -y)"
+    },
+    {
+      "id": "remedy_install_espeak",
+      "risk": "high",
+      "auto_fixable": true,
+      "description": "Install espeak-ng via the system package manager (apt on Linux, winget on Windows).",
+      "undo_instructions": "Linux:   sudo apt remove espeak-ng\nWindows: winget uninstall espeak-ng"
+    },
+    {
+      "id": "remedy_voices_dir_missing",
+      "risk": "manual",
+      "auto_fixable": false,
+      "description": "No Kokoro voice files (.pt) were found. Voice files must be downloaded manually from Hugging Face.",
+      "instructions": [
+        "Kokoro voice files are not bundled with the kokoro pip package.",
+        "Download them from: https://huggingface.co/hexgrad/Kokoro-82M/tree/main/voices",
+        "",
+        "Save the .pt files into the voices directory that SENNI is configured to use.",
+        "If you haven't set a voices_path in SENNI's config, place them in a 'voices/' folder",
+        "next to SENNI's scripts/tts.py file.",
+        "",
+        "Then run AURINI again — it will detect the files and confirm everything is ready."
+      ]
+    }
+  ],
+
+  "settings": [
+    {
+      "id": "python_path",
+      "label": "Python executable",
+      "flag": "python_path",
+      "description": "Path to the Python executable with kokoro installed. Leave blank to use the same Python that SENNI is running under (sys.executable). Set this if you installed kokoro in a virtual environment.",
+      "type": "path",
+      "default": null,
+      "category": "paths",
+      "phase": "config"
+    },
+    {
+      "id": "voices_path",
+      "label": "Voices directory",
+      "flag": "voices_path",
+      "description": "Path to the directory containing Kokoro .pt voice files. Leave blank to auto-discover from the folder next to tts.py. Set this if you store voices in a custom location.",
+      "type": "path",
+      "default": null,
+      "category": "paths",
+      "phase": "config"
+    },
+    {
+      "id": "espeak_path",
+      "label": "espeak-ng binary",
+      "flag": "espeak_path",
+      "description": "Path to the espeak-ng binary. Leave blank to rely on PATH (the default after a normal system install). Set this if espeak-ng is installed to a non-standard location.",
+      "type": "path",
+      "default": null,
+      "category": "paths",
+      "phase": "config"
+    }
+  ],
+
+  "exposes": {
+    "config_keys": ["python_path", "voices_path", "espeak_path"]
+  },
+
+  "requires_plugins": []
+}

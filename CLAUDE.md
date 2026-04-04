@@ -184,7 +184,10 @@ plugins/
       shared.py
       sycl_linux.py
       sycl_windows.py
-  kokoro/            <- future
+  kokoro/            <- Kokoro TTS plugin (session 5)
+    __init__.py
+    plugin.json
+    plugin.py
     plugin.json
     plugin.py
 ```
@@ -668,6 +671,15 @@ Unicode emoji (✓, ✗, etc.) do not render correctly in Windows cmd.exe — th
 - [x] **Add `windows_sdk_present` check** — Windows SDK (rc.exe, kernel32.lib) is not part of the VS C++ workload and must be installed separately via the VS Installer. Added check, remedy with clear instructions, `_find_windows_sdk()` helper, and PATH injection of the SDK bin dir during build.
 - [x] **Windows build confirmed reaching compilation** — all checks pass, clone succeeds, cmake configures, build running on Arc A750 / Windows 10.
 
+### Done — session 5
+- [x] **Kokoro TTS plugin** — `plugins/kokoro/plugin.py`, `plugins/kokoro/plugin.json`, `plugins/kokoro/__init__.py`. Full `AuriniPlugin` implementation. No backend dispatcher — Kokoro is pure Python, all platforms handled in a single plugin.py.
+  - Checks: `python_usable`, `kokoro_importable`, `soundfile_importable`, `espeak_present`, `voices_dir_exists`
+  - Remedies: `remedy_pip_kokoro` (auto), `remedy_pip_soundfile` (auto), `remedy_install_espeak` (auto — apt on Linux, winget on Windows), `remedy_voices_dir_missing` (manual — Hugging Face download, no auto-fix)
+  - Install/update/uninstall via pip; espeak-ng via system package manager
+  - `get_senni_config()` returns `{"python_path", "voices_path", "espeak_path"}` — the three values SENNI writes into `config.json["tts"]`
+  - `build_launch_command()` raises `NotImplementedError` with a clear message — Kokoro has no standalone server process; SENNI's `tts_server.py` owns the subprocess lifecycle
+  - Voices directory check reports voice file count and names up to 5; auto-discovers `voices/` next to `plugin.py` if `voices_path` is not configured
+
 ### Next session — start here
 - [ ] **ASCII fallback for emoji in cmd.exe** — ✓/✗ render as [?] in Windows cmd. Detect `sys.platform == "win32"` in `run_aurini.py` and `run_launch.py`, use `[OK]`/`[FAIL]` instead. Quick fix.
 - [ ] **Update flow test** — `plugin.update()` exists but hasn't been tested. Write a quick `run_update.py` or add an update mode to `run_aurini.py`. Important for real-world use.
@@ -680,7 +692,7 @@ Unicode emoji (✓, ✗, etc.) do not render correctly in Windows cmd.exe — th
 - [ ] `backends/cpu.py` — CPU fallback, all platforms
 - [ ] GUI layer (Tauri)
 - [ ] SENNI plugin
-- [ ] Kokoro TTS plugin (planned — important for SENNI)
+- [x] Kokoro TTS plugin — **done session 5**
 - [ ] Managed venv system (implement when first Python-based plugin requires it)
 - [ ] Per-instance Python versions (future — only if version conflict cases emerge)
 - [ ] "Import existing installation" flow for externally installed components
